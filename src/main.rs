@@ -80,20 +80,97 @@ fn get_port() -> u16 {
     env::args().nth(2).unwrap_or_else(|| "80".to_string()).parse().unwrap_or(80)
 }
 
+use std::env;
+
 fn get_status() -> String {
-    let status = env::args().nth(4).unwrap_or_else(|| "200 OK".to_string());
-match status.as_str() {
-        "101" => "101 Switching Protocols".to_string(),
-        "200" => "200 OK".to_string(),
-        "301" => "301 Moved Permanently".to_string(),
-        "302" => "302 Found".to_string(),
-        "400" => "400 Bad Request".to_string(),
-        "401" => "401 Unauthorized".to_string(),
-        "403" => "403 Forbidden".to_string(),
-        "404" => "404 Not Found".to_string(),
-        "500" => "500 Internal Server Error".to_string(),
-        "502" => "502 Bad Gateway".to_string(),
-        _ if status.contains(' ') => status,
-        _ => status
+    let protocol = env::args().nth(4).unwrap_or_else(|| "http".to_string());
+    let code = env::args().nth(5).unwrap_or_else(|| "200".to_string());
+    
+    match protocol.to_lowercase().as_str() {
+        // HTTP/1.1
+        "http" | "http/1.1" => {
+            format!("HTTP/1.1 {} {}", code, get_status_text(&code))
+        },
+        // HTTP/2
+        "http/2" | "h2" => {
+            format!("HTTP/2 {} {}", code, get_status_text(&code))
+        },
+        // HTTP/3
+        "http/3" | "h3" => {
+            format!("HTTP/3 {} {}", code, get_status_text(&code))
+        },
+        // WebSocket - sempre 101
+        "ws" | "websocket" => {
+            "101 Switching Protocols".to_string()
+        },
+        // HTTPS
+        "https" => {
+            format!("HTTP/1.1 {} {}", code, get_status_text(&code))
+        },
+        // Se for só o status (ex: "200 OK" ou "404")
+        s if s.contains(' ') || s.parse::<u16>().is_ok() => {
+            if s.contains(' ') {
+                s.to_string()
+            } else {
+                format!("{} {}", s, get_status_text(s))
+            }
+        },
+        // Fallback
+        _ => "200 OK".to_string()
     }
 }
+
+fn get_status_text(code: &str) -> &'static str {
+    match code {
+        "100" => "Continue",
+        "101" => "Switching Protocols",
+        "102" => "Processing",
+        "200" => "OK",
+        "201" => "Created",
+        "202" => "Accepted",
+        "203" => "Non-Authoritative Information",
+        "204" => "No Content",
+        "205" => "Reset Content",
+        "206" => "Partial Content",
+        "300" => "Multiple Choices",
+        "301" => "Moved Permanently",
+        "302" => "Found",
+        "303" => "See Other",
+        "304" => "Not Modified",
+        "305" => "Use Proxy",
+        "307" => "Temporary Redirect",
+        "308" => "Permanent Redirect",
+        "400" => "Bad Request",
+        "401" => "Unauthorized",
+        "402" => "Payment Required",
+        "403" => "Forbidden",
+        "404" => "Not Found",
+        "405" => "Method Not Allowed",
+        "406" => "Not Acceptable",
+        "407" => "Proxy Authentication Required",
+        "408" => "Request Timeout",
+        "409" => "Conflict",
+        "410" => "Gone",
+        "411" => "Length Required",
+        "412" => "Precondition Failed",
+        "413" => "Payload Too Large",
+        "414" => "URI Too Long",
+        "415" => "Unsupported Media Type",
+        "416" => "Range Not Satisfiable",
+        "417" => "Expectation Failed",
+        "418" => "I'm a teapot",
+        "426" => "Upgrade Required",
+        "429" => "Too Many Requests",
+        "431" => "Request Header Fields Too Large",
+        "451" => "Unavailable For Legal Reasons",
+        "500" => "Internal Server Error",
+        "501" => "Not Implemented",
+        "502" => "Bad Gateway",
+        "503" => "Service Unavailable",
+        "504" => "Gateway Timeout",
+        "505" => "HTTP Version Not Supported",
+        "511" => "Network Authentication Required",
+        _ => "Unknown Status"
+        
+    }
+ }

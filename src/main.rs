@@ -14,39 +14,98 @@ mod tls;
 mod ssh;
 mod xhttp;
 mod socks5;
+mod udp;
+mod quic;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     env_logger::init();
+    println!("[SDProxy v0.3.0] Multi-Protocolo Proxy");
     println!("[SDProxy] Iniciando...");
 
     // Parse de argumentos
     let config = parse_args();
-    println!("[SDProxy] Porta: {}", config.port);
+    println!("[SDProxy] Porta TCP: {}", config.port);
+    println!("[SDProxy] Porta QUIC: {}", config.quic_port);
     println!("[SDProxy] Status: {}", config.status);
     println!("[SDProxy] TLS habilitado: {}", config.tls_enabled);
     println!("[SDProxy] SSH only: {}", config.ssh_only);
+    println!("[SDProxy] UDP ativo: {}", config.udp_enabled);
+    println!("[SDProxy] QUIC ativo: {}", config.quic_enabled);
 
-    let listener = TcpListener::bind(format!("[::]:{}", config.port)).await?;
-    println!("[SDProxy] Serviço rodando na porta: {}", config.port);
+    // Caminhos dos certificados QUIC
+    let cert_path = "/opt/sdproxy/cert.pem";
+    let key_path = "/opt/sdproxy/key.pem";
 
-    start_http(listener, config).await;
+    // Garantir diretório
+    let _ = std::fs::create_dir_all("/opt/sdproxy");
+
+    // Iniciar listeners em paralelo
+    let config_tcp = Arc::new(config.clone());
+
+    let mut handles = Vec::new();
+
+    // TCP listener (sempre ativo)
+    let tcp_config = config_tcp.clone();
+    handles.push(tokio::spawn(async move {
+        if let Err(e) = start_tcp(tcp_config).await {
+            eprintln!("[SDProxy] Erro TCP: {}", e);
+        }
+    }));
+
+    // UDP listener (se habilitado)
+    if config.udp_enabled {
+        let udp_port = config.port;
+        let ssh_only = config.ssh_only;
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = udp::handle_udp_listener(udp_port, ssh_only).await {
+                eprintln!("[SDProxy] Erro UDP: {}", e);
+            }
+        }));
+    }
+
+    // QUIC listener (se habilitado)
+    if config.quic_enabled {
+        let quic_cert = cert_path.to_string();
+        let quic_key = key_path.to_string();
+        let quic_port = config.quic_port;
+        let ssh_only = config.ssh_only;
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = quic::start_quic_server(quic_port, &quic_cert, &quic_key, ssh_only).await {
+                eprintln!("[SDProxy] Erro QUIC: {}", e);
+            }
+        }));
+    }
+
+    // Aguardar todas as tasks
+    println!("[SDProxy] Todos os protocolos iniciados. Aguardando conexões...");
+    for handle in handles {
+        let _ = handle.await;
+    }
+
     Ok(())
 }
 
+#[derive(Clone)]
 struct Config {
     port: u16,
+    quic_port: u16,
     status: String,
     tls_enabled: bool,
     ssh_only: bool,
+    udp_enabled: bool,
+    quic_enabled: bool,
 }
 
 fn parse_args() -> Config {
     let args: Vec<String> = env::args().collect();
     let mut port: u16 = 80;
+    let mut quic_port: u16 = 8001;
     let mut status = String::from("@SDProxy");
     let mut tls_enabled = false;
     let mut ssh_only = false;
+    let mut udp_enabled = false;
+    let mut quic_enabled = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -54,6 +113,12 @@ fn parse_args() -> Config {
             "--port" | "-p" => {
                 if i + 1 < args.len() {
                     port = args[i + 1].parse().unwrap_or(80);
+                    i += 1;
+                }
+            }
+            "--quic-port" => {
+                if i + 1 < args.len() {
+                    quic_port = args[i + 1].parse().unwrap_or(8001);
                     i += 1;
                 }
             }
@@ -69,33 +134,50 @@ fn parse_args() -> Config {
             "--ssh" | "-ssh" => {
                 ssh_only = true;
             }
+            "--udp" | "-u" => {
+                udp_enabled = true;
+            }
+            "--quic" | "-q" => {
+                quic_enabled = true;
+            }
             _ => {}
         }
         i += 1;
     }
 
+    // TLS habilita UDP e QUIC automaticamente na porta 443
+    if tls_enabled && port == 443 {
+        udp_enabled = true;
+        quic_enabled = true;
+    }
+
     Config {
         port,
+        quic_port,
         status,
         tls_enabled,
         ssh_only,
+        udp_enabled,
+        quic_enabled,
     }
 }
 
-async fn start_http(listener: TcpListener, config: Config) {
-    let config = Arc::new(config);
+async fn start_tcp(config: Arc<Config>) -> Result<(), Error> {
+    let listener = TcpListener::bind(format!("[::]:{}", config.port)).await?;
+    println!("[SDProxy] TCP rodando na porta: {}", config.port);
+
     loop {
         match listener.accept().await {
             Ok((client_stream, addr)) => {
                 let config = config.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_client(client_stream, &config).await {
-                        println!("[SDProxy] Erro ao processar cliente {}: {}", addr, e);
+                        println!("[SDProxy] Erro TCP cliente {}: {}", addr, e);
                     }
                 });
             }
             Err(e) => {
-                println!("[SDProxy] Erro ao aceitar conexão: {}", e);
+                println!("[SDProxy] Erro ao aceitar TCP: {}", e);
             }
         }
     }
@@ -115,19 +197,17 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
         }
     };
 
-    // Detectar protocolo usando o módulo protocol
+    // Detectar protocolo
     let proto = protocol::detect_protocol(&peek_data);
-    println!("[SDProxy] Cliente detectado - Protocolo: {}", proto);
+    println!("[SDProxy] TCP - Protocolo detectado: {} ({} bytes)", proto, peek_data.len());
 
     match proto.as_str() {
         "TLS" => {
             if config.tls_enabled {
-                // TLS com terminação no proxy
                 if let Err(e) = tls::handle_tls(client_stream, config.ssh_only).await {
-                    println!("[SDProxy] Erro TLS terminação: {}", e);
+                    println!("[SDProxy] Erro TLS: {}", e);
                 }
             } else {
-                // TLS passthrough direto
                 if let Err(e) = tls::handle_tls_terminated(client_stream, config.ssh_only).await {
                     println!("[SDProxy] Erro TLS passthrough: {}", e);
                 }
@@ -161,16 +241,15 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
         "SSH" => {
             if config.ssh_only {
                 if let Err(e) = ssh::handle_ssh_tunnel(client_stream, "127.0.0.1:22").await {
-                    println!("[SDProxy] Erro SSH tunnel: {}", e);
+                    println!("[SDProxy] Erro SSH: {}", e);
                 }
             } else {
-                // Detectar se é SSH puro ou dados mistos
                 if peek_data.contains("SSH-") {
                     if let Err(e) = ssh::handle_ssh_tunnel(client_stream, "127.0.0.1:22").await {
-                        println!("[SDProxy] Erro SSH tunnel: {}", e);
+                        println!("[SDProxy] Erro SSH: {}", e);
                     }
                 } else {
-                    // Handshake HTTP básico (101 + 200)
+                    // Handshake HTTP básico
                     let _ = client_stream.write_all(
                         format!("HTTP/1.1 101 {}\r\n\r\n", config.status).as_bytes()
                     ).await;
@@ -178,7 +257,6 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
                         format!("HTTP/1.1 200 {}\r\n\r\n", config.status).as_bytes()
                     ).await;
 
-                    // Determinar backend
                     let addr_proxy = if peek_data.contains("SSH") || peek_data.is_empty() {
                         "127.0.0.1:22"
                     } else {
@@ -199,14 +277,14 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
                             );
                         }
                         Err(e) => {
-                            println!("[SDProxy] Erro ao conectar ao backend: {}", e);
+                            println!("[SDProxy] Erro backend: {}", e);
                         }
                     }
                 }
             }
         }
         _ => {
-            // Fallback TCP - encaminhar diretamente
+            // Fallback TCP
             if let Err(e) = tcp_fallback::handle_tcp(client_stream).await {
                 println!("[SDProxy] Erro TCP fallback: {}", e);
             }

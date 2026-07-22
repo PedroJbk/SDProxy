@@ -1,392 +1,155 @@
 #!/bin/bash
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SDProxy - Multi-Protocol Proxy Installer
-# Version: 2.1 Professional
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
+# SDProxy Installer v2.1
 set -e
 
-# ═══════════════════════════════════════════════════════════════════
-# CONFIGURAÇÃO
-# ═══════════════════════════════════════════════════════════════════
-SDPROXY="/opt/sdproxy"
-PROXY_BIN="${SDPROXY}/proxy"
-CERT_DIR="${SDPROXY}"
-BUILD_DIR="/tmp/sdproxy_build_$$"
-RAW="https://raw.githubusercontent.com/PedroJbk/SDProxy/main"
-
-# ═══════════════════════════════════════════════════════════════════
-# CORES & ESTILOS
-# ═══════════════════════════════════════════════════════════════════
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-WHITE='\033[0;37m'
-BOLD='\033[1m'
-DIM='\033[2m'
+BLUE='\033[1;34m'
+GREEN='\033[1;32m'
+RED='\033[1;31m'
+YELLOW='\033[1;33m'
+WHITE='\033[1;37m'
 NC='\033[0m'
+BOLD='\033[1m'
+BOLD='\033[1m'
 
-# ═══════════════════════════════════════════════════════════════════
-# FUNÇÕES DE UI
-# ═══════════════════════════════════════════════════════════════════
+RAW="https://raw.githubusercontent.com/PedroJbk/SDProxy/main"
+BUILD_DIR="/tmp/sdproxy_build"
+INSTALL_DIR="/opt/sdproxy"
 
-banner() {
-    clear
-    echo -e "${CYAN}${BOLD}"
-    echo "  ╔══════════════════════════════════════════════════════╗"
-    echo "  ║                                                      ║"
-    echo "  ║   ███████╗███████╗██████╗ ██╗      ██████╗ ██╗████████╗  ║"
-    echo "  ║   ██╔════╝██╔════╝██╔══██╗██║     ██╔═══██╗██║╚══██╔══╝  ║"
-    echo "  ║   ███████╗█████╗  ██████╔╝██║     ██║   ██║██║   ██║     ║"
-    echo "  ║   ╚════██║██╔══╝  ██╔══██╗██║     ██║   ██║██║   ██║     ║"
-    echo "  ║   ███████║███████╗██║  ██║███████╗╚██████╔╝██║   ██║     ║"
-    echo "  ║   ╚══════╝╚══════╝╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═╝   ╚═╝     ║"
-    echo "  ║                                                      ║"
-    echo "  ║       P R O X Y                                       ║"
-    echo "  ║                                                      ║"
-    echo "  ║   ┌──────────────────────────────────────────────┐   ║"
-    echo "  ║   │  Multi-Protocol • xHTTP • TLS • WebSocket   │   ║"
-    echo "  ║   │  SSH Tunnel • SOCKS5 • QUIC • UDP          │   ║"
-    echo "  ║   └──────────────────────────────────────────────┘   ║"
-    echo "  ║                                                      ║"
-    echo "  ║   Version 2.1  │  github.com/PedroJbk/SDProxy       ║"
-    echo "  ║                                                      ║"
-    echo "  ╚══════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
-}
+clear
 
-separator() {
-    echo -e "${DIM}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-}
-
-step_header() {
-    local num=$1
-    local total=$2
-    local title=$3
-    echo -e ""
-    echo -e "${BOLD}${GREEN}[${num}/${total}]${NC} ${BOLD}${CYAN}${title}${NC}"
-    separator
-}
-
-progress_bar() {
-    local percent=$1
-    local bar_width=40
-    local filled=$((percent * bar_width / 100))
-    local empty=$((bar_width - filled))
-    local bar=""
-    
-    for i in $(seq 1 $filled); do bar="${bar}█"; done
-    for i in $(seq 1 $empty); do bar="${bar}░"; done
-    
-    echo -e "${GREEN}[${bar}]${NC} ${WHITE}${percent}%${NC}"
-}
-
-check_ok() {
-    echo -e "  ${GREEN}✔${NC} $1"
-}
-
-check_err() {
-    echo -e "  ${RED}✘${NC} $1"
-}
-
-check_warn() {
-    echo -e "  ${YELLOW}⚠${NC} $1"
-}
-
-download_file() {
-    local src=$1
-    local dst=$2
-    wget -q "${src}" -O "${dst}" 2>/dev/null
-    local rc=$?
-    if [ $rc -eq 0 ]; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-# ═══════════════════════════════════════════════════════════════════
-# BANNER INICIAL
-# ═══════════════════════════════════════════════════════════════════
-banner
-
-# Sistema info
-echo -e "  ${DIM}Sistema:${NC} ${WHITE}$(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d'"' -f2)${NC}"
-echo -e "  ${DIM}Kernel:${NC}  ${WHITE}$(uname -r)${NC}"
-echo -e "  ${DIM}Arq:${NC}     ${WHITE}$(uname -m)${NC}"
-echo -e "  ${DIM}Data:${NC}    ${WHITE}$(date '+%d/%m/%Y %H:%M:%S')${NC}"
+echo -e "${BLUE}${BOLD} ███████╗██████╗ ██████╗ ██████╗  ██████╗ ██╗  ██╗██╗   ██╗${NC}"
+echo -e "${WHITE}${BOLD} ██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝╚██╗ ██╔╝${NC}"
+echo -e "${BLUE}${BOLD} ███████╗██║  ██║██████╔╝██████╔╝██║   ██║ ╚███╔╝  ╚████╔╝ ${NC}"
+echo -e "${WHITE}${BOLD} ╚════██║██║  ██║██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗   ╚██╔╝  ${NC}"
+echo -e "${BLUE}${BOLD} ███████║██████╔╝██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   ${NC}"
+echo -e "${WHITE}${BOLD} ╚══════╝╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ${NC}"
+echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
+echo -e "${WHITE} Multi-Protocolo Proxy v2.1"
+echo -e "${WHITE} GitHub: ${BLUE}github.com/PedroJbk/SDProxy${NC}"
+echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
 echo ""
 
-# ═══════════════════════════════════════════════════════════════════
-# ETAPA 1: DEPENDÊNCIAS
-# ═══════════════════════════════════════════════════════════════════
-step_header 1 5 "Instalando dependências"
-
-echo -e "  ${YELLOW}Atualizando pacotes...${NC}"
+# Etapa 1: Dependências
+echo -e "${GREEN}[1/5]${NC} Verificando dependências..."
 apt-get update -qq >/dev/null 2>&1 || true
 
-# Verificar e instalar cada dependência
-DEPS=0
-
 if ! command -v git &> /dev/null; then
-    echo -e "  ${YELLOW}→ Instalando git...${NC}"
-    apt-get install -y -qq git >/dev/null 2>&1 && check_ok "git instalado" || check_err "git falhou"
-    DEPS=$((DEPS+1))
-else
-    check_ok "git já instalado ($(git --version | awk '{print $3}'))"
+    apt-get install -y -qq git >/dev/null 2>&1
+    echo -e "  ${GREEN}✔${NC} git instalado"
 fi
 
 if ! command -v gcc &> /dev/null; then
-    echo -e "  ${YELLOW}→ Instalando build-essential...${NC}"
-    apt-get install -y -qq build-essential >/dev/null 2>&1 && check_ok "build-essential instalado" || check_err "build-essential falhou"
-    DEPS=$((DEPS+1))
-else
-    check_ok "gcc já instalado ($(gcc --version | head -1 | awk '{print $4}'))"
+    apt-get install -y -qq build-essential >/dev/null 2>&1
+    echo -e "  ${GREEN}✔${NC} build-essential instalado"
 fi
 
 if ! command -v openssl &> /dev/null; then
-    echo -e "  ${YELLOW}→ Instalando openssl...${NC}"
-    apt-get install -y -qq openssl >/dev/null 2>&1 && check_ok "openssl instalado" || check_err "openssl falhou"
-    DEPS=$((DEPS+1))
-else
-    check_ok "openssl já instalado ($(openssl version | awk '{print $2}'))"
+    apt-get install -y -qq openssl >/dev/null 2>&1
+    echo -e "  ${GREEN}✔${NC} openssl instalado"
 fi
 
-if [ $DEPS -eq 0 ]; then
-    echo -e "  ${GREEN}Todas as dependências já estão instaladas${NC}"
-fi
-
-# Rust
-echo -e "  ${YELLOW}→ Verificando Rust/Cargo...${NC}"
 if ! command -v cargo &> /dev/null; then
-    echo -e "  ${YELLOW}→ Instalando Rust...${NC}"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y 2>/dev/null
+    echo -e "  ${YELLOW}→${NC} Instalando Rust..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1
     source "$HOME/.cargo/env" 2>/dev/null || true
     export PATH="$HOME/.cargo/bin:$PATH"
-fi
-
-if command -v cargo &> /dev/null; then
-    check_ok "cargo $(cargo --version | awk '{print $2}')"
+    echo -e "  ${GREEN}✔${NC} Rust instalado"
 else
-    check_err "cargo não encontrado no PATH"
-    echo -e "  ${RED}Aborte. Execute: source \$HOME/.cargo/env${NC}"
-    exit 1
+    echo -e "  ${GREEN}✔${NC} Rust já instalado"
 fi
 
-# SSH
 if ! systemctl is-active --quiet ssh 2>/dev/null; then
-    echo -e "  ${YELLOW}→ Ativando OpenSSH Server...${NC}"
     apt-get install -y -qq openssh-server >/dev/null 2>&1 || true
     systemctl enable ssh 2>/dev/null || true
     systemctl start ssh 2>/dev/null || true
-    check_ok "SSH iniciado"
-else
-    check_ok "SSH já rodando"
+    echo -e "  ${GREEN}✔${NC} SSH ativado"
 fi
 
 echo ""
 
-# ═══════════════════════════════════════════════════════════════════
-# ETAPA 2: DOWNLOAD
-# ═══════════════════════════════════════════════════════════════════
-step_header 2 5 "Baixando arquivos do GitHub"
-
+# Etapa 2: Download
+echo -e "${GREEN}[2/5]${NC} Baixando arquivos..."
 rm -rf "${BUILD_DIR}"
 mkdir -p "${BUILD_DIR}/src"
 
-# Lista de arquivos para baixar
-FILES=(
-    "Cargo.toml:Cargo.toml"
-    "Cargo.lock:Cargo.lock"
-    "src/main.rs:src/main.rs"
-    "src/xhttp.rs:src/xhttp.rs"
-    "src/tls.rs:src/tls.rs"
-    "src/protocol.rs:src/protocol.rs"
-    "src/websocket.rs:src/websocket.rs"
-    "src/security.rs:src/security.rs"
-    "src/tcp_fallback.rs:src/tcp_fallback.rs"
-    "src/ssh.rs:src/ssh.rs"
-    "src/socks5.rs:src/socks5.rs"
-    "src/udp.rs:src/udp.rs"
-    "src/quic.rs:src/quic.rs"
-)
-
-TOTAL=${#FILES[@]}
-DOWNLOADED=0
-FAILED=0
-
-for entry in "${FILES[@]}"; do
-    SRC="${entry%%:*}"
-    DST="${entry##*:}"
-    
-    download_file "${RAW}/${SRC}" "${BUILD_DIR}/${DST}"
-    
-    if [ $? -eq 0 ] && [ -f "${BUILD_DIR}/${DST}" ]; then
-        check_ok "${DST}"
-        DOWNLOADED=$((DOWNLOADED+1))
-    else
-        check_err "${DST} (falha)"
-        FAILED=$((FAILED+1))
-    fi
+for file in Cargo.toml Cargo.lock src/main.rs src/xhttp.rs src/tls.rs src/protocol.rs src/websocket.rs src/security.rs src/tcp_fallback.rs src/ssh.rs src/socks5.rs src/udp.rs src/quic.rs; do
+    wget -q "${RAW}/${file}" -O "${BUILD_DIR}/${file}" 2>/dev/null
 done
 
-PERCENT=$((DOWNLOADED * 100 / TOTAL))
-echo -e ""
-echo -e "  ${DIM}Baixados: ${WHITE}${DOWNLOADED}/${TOTAL}${NC}  ${DIM}(${PERCENT}%)${NC}"
-echo -e "  $(progress_bar $PERCENT)"
-
-if [ $FAILED -gt 0 ]; then
-    echo -e "  ${RED}${FAILED} arquivo(s) falharam no download${NC}"
-    echo -e "  ${YELLOW}Verifique sua conexão com o GitHub${NC}"
-    rm -rf "${BUILD_DIR}"
+if [ ! -f "${BUILD_DIR}/Cargo.toml" ] || [ ! -f "${BUILD_DIR}/src/main.rs" ]; then
+    echo -e "  ${RED}✘ Erro ao baixar arquivos${NC}"
     exit 1
 fi
 
-RS_COUNT=$(find "${BUILD_DIR}/src" -name "*.rs" | wc -l)
-check_ok "${RS_COUNT} módulos Rust prontos"
-
+echo -e "  ${GREEN}✔${NC} $(find ${BUILD_DIR}/src -name '*.rs' | wc -l) módulos baixados"
 echo ""
 
-# ═══════════════════════════════════════════════════════════════════
-# ETAPA 3: COMPILAÇÃO
-# ═══════════════════════════════════════════════════════════════════
-step_header 3 5 "Compilando SDProxy (Rust Release)"
-
-echo -e "  ${DIM}Isso pode levar alguns minutos na primeira vez...${NC}"
-echo -e "  ${DIM}Compilando com otimizações (--release)...${NC}"
-echo -e ""
-
+# Etapa 3: Compilação
+echo -e "${GREEN}[3/5]${NC} Compilando SDProxy..."
 cd "${BUILD_DIR}"
+cargo build --release >/dev/null 2>&1
 
-# Mostrar progresso de compilação
-cargo build --release 2>&1 | while IFS= read -r line; do
-    if echo "$line" | grep -q "^error"; then
-        echo -e "  ${RED}${line}${NC}"
-    elif echo "$line" | grep -q "Compiling"; then
-        echo -e "  ${DIM}  ${CYAN}→${NC} ${line#*Compiling }${NC}"
-    elif echo "$line" | grep -q "Finished"; then
-        echo -e "  ${GREEN}${line}${NC}"
-    fi
-done
-
-if [ -f "${BUILD_DIR}/target/release/sdproxy" ]; then
-    echo ""
-    check_ok "Binário gerado com sucesso"
-    BINARY_SIZE=$(du -h "${BUILD_DIR}/target/release/sdproxy" | awk '{print $1}')
-    echo -e "  ${DIM}Tamanho: ${WHITE}${BINARY_SIZE}${NC}"
-else
-    echo ""
-    check_err "Compilação falhou"
+if [ ! -f "${BUILD_DIR}/target/release/sdproxy" ]; then
+    echo -e "  ${RED}✘ Compilação falhou${NC}"
     rm -rf "${BUILD_DIR}"
     exit 1
 fi
 
+echo -e "  ${GREEN}✔${NC} Compilado com sucesso"
 echo ""
 
-# ═══════════════════════════════════════════════════════════════════
-# ETAPA 4: INSTALAÇÃO
-# ═══════════════════════════════════════════════════════════════════
-step_header 4 5 "Instalando no sistema"
+# Etapa 4: Instalação
+echo -e "${GREEN}[4/5]${NC} Instalando..."
+mkdir -p "${INSTALL_DIR}"
 
-mkdir -p "${SDPROXY}"
+cp "${BUILD_DIR}/target/release/sdproxy" "${INSTALL_DIR}/proxy"
+chmod +x "${INSTALL_DIR}/proxy"
 
-# Binário
-cp "${BUILD_DIR}/target/release/sdproxy" "${PROXY_BIN}"
-chmod +x "${PROXY_BIN}"
-check_ok "Binário em ${PROXY_BIN}"
+wget -q "${RAW}/menu.sh" -O "${INSTALL_DIR}/menu.sh" 2>/dev/null || true
+chmod +x "${INSTALL_DIR}/menu.sh" 2>/dev/null
+ln -sf "${INSTALL_DIR}/menu.sh" /usr/local/bin/sdproxy 2>/dev/null || true
 
-# Menu
-download_file "${RAW}/menu.sh" "${SDPROXY}/menu.sh"
-if [ -f "${SDPROXY}/menu.sh" ]; then
-    chmod +x "${SDPROXY}/menu.sh"
-    ln -sf "${SDPROXY}/menu.sh" /usr/local/bin/sdproxy
-    check_ok "Menu instalado (comando: sdproxy)"
-else
-    check_warn "menu.sh não baixado"
-fi
-
-# Certificados TLS
-echo -e "  ${YELLOW}→ Certificados TLS...${NC}"
-if [ ! -f "${CERT_DIR}/cert.pem" ] || [ ! -f "${CERT_DIR}/key.pem" ]; then
-    openssl req -x509 -newkey rsa:2048 -keyout "${CERT_DIR}/key.pem" \
-        -out "${CERT_DIR}/cert.pem" -days 365 -nodes \
+if [ ! -f "${INSTALL_DIR}/cert.pem" ] || [ ! -f "${INSTALL_DIR}/key.pem" ]; then
+    openssl req -x509 -newkey rsa:2048 -keyout "${INSTALL_DIR}/key.pem" \
+        -out "${INSTALL_DIR}/cert.pem" -days 365 -nodes \
         -subj "/CN=sdproxy/O=SDProxy/C=BR" 2>/dev/null
-    check_ok "Certificados gerados (${CERT_DIR}/)"
-else
-    check_ok "Certificados existentes"
 fi
 
+rm -rf "${BUILD_DIR}"
+
+echo -e "  ${GREEN}✔${NC} Binário instalado"
+echo -e "  ${GREEN}✔${NC} Certificados TLS gerados"
 echo ""
 
-# ═══════════════════════════════════════════════════════════════════
-# ETAPA 5: LIMPEZA & RESUMO
-# ═══════════════════════════════════════════════════════════════════
-step_header 5 5 "Finalizando"
+# Etapa 5: Finalizar
+echo -e "${GREEN}[5/5]${NC} Finalizando..."
 
-# Limpar build
-rm -rf "${BUILD_DIR}"
-check_ok "Arquivos temporários removidos"
-
-# Parar serviços antigos
-STOPPED=0
 for svc in /etc/systemd/system/proxy-*.service; do
-    if [ -f "$svc" ]; then
-        PORT=$(basename "$svc" .service | sed 's/proxy-//')
-        systemctl stop "proxy-${PORT}.service" 2>/dev/null || true
-        systemctl disable "proxy-${PORT}.service" 2>/dev/null || true
-        STOPPED=$((STOPPED+1))
-    fi
+    [ -f "$svc" ] && systemctl stop "$(basename "$svc" .service)" 2>/dev/null && systemctl disable "$(basename "$svc" .service)" 2>/dev/null
 done
-[ $STOPPED -gt 0 ] && check_ok "${STOPPED} serviço(s) antigo(s) parados"
 
-# ═══════════════════════════════════════════════════════════════════
-# BANNER FINAL
-# ═══════════════════════════════════════════════════════════════════
 clear
-echo -e "${CYAN}${BOLD}"
-echo "  ╔══════════════════════════════════════════════════════╗"
-echo "  ║                                                      ║"
-echo "  ║   ███████╗███████╗██████╗ ██║  ██║                   ║"
-echo "  ║   ██╔════╝██╔════╝██╔══██╗██║  ██║                   ║"
-echo "  ║   ███████╗█████╗  ██████╔╝███████║                   ║"
-echo "  ║   ╚════██║██╔══╝  ██╔══██╗╚════██║                   ║"
-echo "  ║   ███████║███████╗██║  ██║     ██║                   ║"
-echo "  ║   ╚══════╝╚══════╝╚═╝  ╚═╝     ╚═╝                   ║"
-echo "  ║                                                      ║"
-echo "  ║              I N S T A L L E D                       ║"
-echo "  ║                                                      ║"
-echo "  ╚══════════════════════════════════════════════════════╝"
-echo -e "${NC}"
 
-separator
-echo -e ""
-echo -e "  ${BOLD}${GREEN}✔ Instalação concluída com sucesso!${NC}"
-echo -e ""
-separator
-echo -e ""
-echo -e "  ${DIM}Binário:${NC}    ${WHITE}${PROXY_BIN}${NC}"
-echo -e "  ${DIM}Menu:${NC}       ${WHITE}sdproxy${NC}  ${DIM}(comando global)${NC}"
-echo -e "  ${DIM}Certificados:${NC} ${WHITE}${CERT_DIR}/${NC}"
-echo -e ""
-separator
-echo -e ""
-echo -e "  ${BOLD}${CYAN}Protocolos suportados:${NC}"
-echo -e "  ${WHITE}├──${NC} SSH Tunnel"
-echo -e "  ${WHITE}├──${NC} WebSocket"
-echo -e "  ${WHITE}├──${NC} xHTTP / SplitHTTP ${YELLOW}(porta 443)${NC}"
-echo -e "  ${WHITE}├──${NC} TLS/SSL"
-echo -e "  ${WHITE}├──${NC} SOCKS5"
-echo -e "  ${WHITE}├──${NC} QUIC"
-echo -e "  ${WHITE}└──${NC} UDP"
-echo -e ""
-separator
-echo -e ""
-echo -e "  ${BOLD}${GREEN}Para iniciar:${NC}"
-echo -e "  ${WHITE}$ sdproxy${NC}"
-echo -e ""
-echo -e "  ${DIM}[01] Abrir Porta          [04] xHTTP SplitHTTP (443)${NC}"
-echo -e "  ${DIM}[02] Fechar Porta         [00] Sair${NC}"
-echo -e ""
-echo -e "  ${CYAN}github.com/PedroJbk/SDProxy${NC}"
-echo -e ""
+echo -e "${BLUE}${BOLD} ███████╗██████╗ ██████╗ ██████╗  ██████╗ ██╗  ██╗██╗   ██╗${NC}"
+echo -e "${WHITE}${BOLD} ██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝╚██╗ ██╔╝${NC}"
+echo -e "${BLUE}${BOLD} ███████╗██║  ██║██████╔╝██████╔╝██║   ██║ ╚███╔╝  ╚████╔╝ ${NC}"
+echo -e "${WHITE}${BOLD} ╚════██║██║  ██║██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗   ╚██╔╝  ${NC}"
+echo -e "${BLUE}${BOLD} ███████║██████╔╝██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   ${NC}"
+echo -e "${WHITE}${BOLD} ╚══════╝╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ${NC}"
+echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
+echo ""
+echo -e "  ${GREEN}${BOLD}✔ Instalação concluída!${NC}"
+echo ""
+echo -e "  ${BLUE}${BOLD}Protocolos:${NC}"
+echo -e "    ├─ SSH Tunnel"
+echo -e "    ├─ WebSocket"
+echo -e "    ├─ ${YELLOW}xHTTP / SplitHTTP (porta 443)${NC}"
+echo -e "    ├─ TLS/SSL"
+echo -e "    ├─ SOCKS5"
+echo -e "    ├─ QUIC"
+echo -e "    └─ UDP"
+echo ""
+echo -e "  ${WHITE}${BOLD}Comando:${NC} sdproxy"
+echo -e "  ${WHITE}${BOLD}Opção:${NC} [04] xHTTP SplitHTTP"
+echo ""
+echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"

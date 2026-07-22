@@ -263,7 +263,7 @@ async fn handle_xhttp_post(
     // Ler o body
     let mut body_buf = vec![0u8; content_length as usize];
     match timeout(Duration::from_secs(30), stream.read_exact(&mut body_buf)).await {
-        Ok(Ok(())) => {
+        Ok(Ok(_)) => {
             println!("[xHTTP] POST body recebido: {} bytes", body_buf.len());
 
             // Encontrar sessão e enviar dados ao SSH backend

@@ -17,29 +17,25 @@ pub async fn start_quic_server(
     use quinn::Endpoint;
     use std::net::SocketAddr;
 
-    let addr: SocketAddr = format!("[::]:{}", port).parse()?;
+    let addr: SocketAddr = format!("[::]:{}", port).parse()
+        .map_err(|e: std::net::AddrParseError| Error::new(std::io::ErrorKind::Other, e))?;
 
     // Carregar certificados
-    let mut cert_file = std::fs::File::open(cert_path)?;
-    let mut key_file = std::fs::File::open(key_path)?;
-
-    let mut cert_buf = Vec::new();
-    std::io::Read::read_to_end(&mut cert_file, &mut cert_buf)?;
-    let mut key_buf = Vec::new();
-    std::io::Read::read_to_end(&mut key_file, &mut key_buf)?;
+    let cert_data = std::fs::read(cert_path)?;
+    let key_data = std::fs::read(key_path)?;
 
     // Parse certificados
-    let cert_reader = std::io::Cursor::new(&cert_buf);
+    let mut cert_reader = std::io::Cursor::new(cert_data);
     let certs: Vec<rustls::pki_types::CertificateDer<'_>> =
-        rustls_pemfile::certs(cert_reader).filter_map(|c| c.ok()).collect();
+        rustls_pemfile::certs(&mut cert_reader).filter_map(|c| c.ok()).collect();
 
-    let key_der = rustls_pemfile::private_key(&mut std::io::Cursor::new(&key_buf))
-        .ok()
-        .and_then(|r| r.ok())
-        .ok_or_else(|| Error::new(std::io::ErrorKind::Other, "Key parse error"))?;
+    let mut key_reader = std::io::Cursor::new(key_data);
+    let key_der = rustls_pemfile::private_key(&mut key_reader)
+        .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?
+        .ok_or_else(|| Error::new(std::io::ErrorKind::Other, "No private key found"))?;
 
     // Configurar quinn server
-    let server_config = quinn::ServerConfig::with_single_cert(certs, key_der)
+    let mut server_config = quinn::ServerConfig::with_single_cert(certs, key_der)
         .map_err(|e| Error::new(std::io::ErrorKind::Other, format!("QUIC cert error: {}", e)))?;
 
     // Configurar transport

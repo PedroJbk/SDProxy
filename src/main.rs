@@ -128,7 +128,7 @@ fn is_http_request(data: &str) -> bool {
     let methods = ["GET", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "HEAD", "PATCH", "ACL", "MOVE", "PROPFIND", "SECURITY"];
     let data_upper = data.to_uppercase();
     for m in methods {
-        if data_upper.starts_with(m) || data_upper.contains(&format!("[SPLIT]{}", m)) { return true; }
+        if data_upper.contains(m) { return true; }
     }
     data_upper.contains("HTTP/1.") || data_upper.contains("HTTP/2.")
 }

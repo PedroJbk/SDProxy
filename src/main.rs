@@ -62,15 +62,12 @@ async fn handle_client(mut client_stream: TcpStream, status: &str, use_tls: bool
     // ============================================================
     // FLUXO PRINCIPAL: Baseado no BSProxy que funciona perfeitamente
     // ============================================================
-    //
-    // O BSProxy tem um fluxo MUITO simples no handle_client:
     // 1. SEMPRE envia HTTP/1.1 101 {status}\r\n\r\n primeiro
-    // 2. SEMPRE lê do cliente
+    // 2. SEMPRE lê do cliente (payload do Injector)
     // 3. SEMPRE envia HTTP/1.1 200 {status}\r\n\r\n
-    // 4. Depois detecta SSH vs VPN pelo peek
-    //
-    // O AWProxy anterior estava tentando fazer detecção ANTES de responder,
-    // o que faz o Injector fechar a conexão.
+    // 4. Conecta ao backend SSH
+    // 5. ENCAMINHA O PAYLOAD ao backend SSH (CRUCIAL!)
+    // 6. Faz tunnel bidirecional
 
     // PASSO 1: SEMPRE envia 101 Switching Protocols primeiro
     log::info!("📤 Enviando 101 Switching Protocols...");
@@ -80,8 +77,9 @@ async fn handle_client(mut client_stream: TcpStream, status: &str, use_tls: bool
     client_stream.flush().await?;
 
     // PASSO 2: SEMPRE lê do cliente (payload do Injector)
-    let mut payload_buf = vec![0u8; 1024];
-    let bytes_read = match timeout(Duration::from_millis(500), client_stream.read(&mut payload_buf)).await {
+    // O Injector envia o request HTTP após receber o 101
+    let mut payload_buf = vec![0u8; 4096];
+    let bytes_read = match timeout(Duration::from_millis(2000), client_stream.read(&mut payload_buf)).await {
         Ok(Ok(n)) => n,
         Ok(Err(e)) => {
             log::warn!("⚠️ Erro ao ler payload: {}", e);
@@ -94,7 +92,7 @@ async fn handle_client(mut client_stream: TcpStream, status: &str, use_tls: bool
     };
 
     let payload = String::from_utf8_lossy(&payload_buf[..bytes_read]);
-    log::debug!("📩 Payload ({} bytes): {:?}", bytes_read, &payload[..std::cmp::min(bytes_read, 200)]);
+    log::info!("📩 Payload lido: {} bytes - {:?}", bytes_read, &payload[..std::cmp::min(bytes_read, 200)]);
 
     // PASSO 3: SEMPRE envia 200 OK
     log::info!("📤 Enviando 200 OK...");
@@ -103,73 +101,69 @@ async fn handle_client(mut client_stream: TcpStream, status: &str, use_tls: bool
         .await?;
     client_stream.flush().await?;
 
-    // PASSO 4: Detecta protocolo e encaminha para backend
-    // Só agora fazemos detecção, depois do handshake completo
-
+    // PASSO 4: Detecta backend e conecta
     if bytes_read == 0 {
         // Sem payload - fallback para TCP puro
         log::info!("📦 Sem payload - TCP fallback");
         return tcp_fallback::handle_tcp(client_stream).await.map_err(|e| Error::new(std::io::ErrorKind::Other, e));
     }
 
-    let first_byte = payload_buf[0];
-
-    // SOCKS5 (primeiro byte = 0x05) - mas já enviamos 101+200, então é tarde demais
-    // Na prática, SOCKS5 não passa pelo Injector, então não deveria chegar aqui
-    if first_byte == 0x05 {
-        log::info!("🔐 SOCKS5 detectado (após handshake) - encaminhando para SOCKS5 handler");
-        return Ok(());
-    }
-
-    // TLS/SSL Handshake (0x16)
-    if first_byte == 0x16 {
-        log::info!("🛡️ TLS detectado (após handshake) - passthrough");
-        return tls::handle_tls(client_stream).await.map_err(|e| Error::new(std::io::ErrorKind::Other, e));
-    }
-
     // Detecta SSH vs VPN pelo conteúdo do payload
+    // O Injector envia "SSH" no payload quando é modo SSH
     let addr_proxy = if payload.contains("SSH") || payload.is_empty() {
         "127.0.0.1:22"
     } else {
         "127.0.0.1:1194"
     };
 
-    log::info!("🔗 Backend detectado: {} (payload: {:?})", addr_proxy, &payload[..std::cmp::min(payload.len(), 100)]);
+    log::info!("🔗 Backend detectado: {}", addr_proxy);
 
-    // Conecta ao backend e faz tunnel bidirecional
-    let server_connect = TcpStream::connect(addr_proxy).await;
-    if server_connect.is_err() {
-        let alt = if addr_proxy == "127.0.0.1:22" { "127.0.0.1:1194" } else { "127.0.0.1:22" };
-        log::warn!("⚠️ Falha em {}, tentando {}", addr_proxy, alt);
-        match TcpStream::connect(alt).await {
-            Ok(s) => {
-                log::info!("✅ Túnel iniciado para {}", alt);
-                let (cr, cw) = client_stream.into_split();
-                let (sr, sw) = s.into_split();
-                let cr = Arc::new(Mutex::new(cr));
-                let cw = Arc::new(Mutex::new(cw));
-                let sr = Arc::new(Mutex::new(sr));
-                let sw = Arc::new(Mutex::new(sw));
-                tokio::try_join!(transfer_data(cr, sw), transfer_data(sr, cw))?;
-                Ok(())
-            }
-            Err(_) => {
-                log::warn!("⚠️ Ambos backends falharam");
-                Ok(())
+    // PASSO 5: Conecta ao backend
+    let server_stream = match TcpStream::connect(addr_proxy).await {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("⚠️ Falha em {}: {}. Tentando fallback...", addr_proxy, e);
+            let alt = if addr_proxy == "127.0.0.1:22" { "127.0.0.1:1194" } else { "127.0.0.1:22" };
+            match TcpStream::connect(alt).await {
+                Ok(s) => {
+                    log::info!("✅ Conectado ao fallback: {}", alt);
+                    s
+                }
+                Err(e2) => {
+                    log::error!("❌ Ambos backends falharam: {}, {}", e, e2);
+                    return Ok(());
+                }
             }
         }
-    } else {
-        let server_stream = server_connect?;
-        log::info!("✅ Túnel iniciado para {}", addr_proxy);
-        let (cr, cw) = client_stream.into_split();
-        let (sr, sw) = server_stream.into_split();
-        let cr = Arc::new(Mutex::new(cr));
-        let cw = Arc::new(Mutex::new(cw));
-        let sr = Arc::new(Mutex::new(sr));
-        let sw = Arc::new(Mutex::new(sw));
-        tokio::try_join!(transfer_data(cr, sw), transfer_data(sr, cw))?;
-        Ok(())
-    }
+    };
+
+    log::info!("✅ Conectado ao backend: {}", addr_proxy);
+
+    // PASSO 5b: ENCAMINHAR O PAYLOAD ao backend SSH (antes do tunnel!)
+    // O payload contém o request HTTP que o SSH server precisa processar
+    // Se não enviarmos o payload, o SSH server recebe garbage do tunnel
+    let (mut client_r, mut client_w) = client_stream.into_split();
+    let (mut server_r, mut server_w) = server_stream.into_split();
+
+    // Primeiro, envia o payload já lido ao backend SSH
+    server_w.write_all(&payload_buf[..bytes_read]).await?;
+    server_w.flush().await?;
+    log::info!("📤 Payload encaminhado ao backend SSH ({} bytes)", bytes_read);
+
+    let client_r = Arc::new(Mutex::new(client_r));
+    let client_w = Arc::new(Mutex::new(client_w));
+    let server_r = Arc::new(Mutex::new(server_r));
+    let server_w = Arc::new(Mutex::new(server_w));
+
+    // PASSO 6: Tunnel bidirecional
+    log::info!("🔗 Túnel bidirecional iniciado");
+    tokio::try_join!(
+        transfer_data(client_r, server_w.clone()),
+        transfer_data(server_r, client_w.clone()),
+    )?;
+
+    log::info!("🔚 Túnel finalizado.");
+    Ok(())
 }
 
 async fn transfer_data(

@@ -9,7 +9,9 @@ use log::info;
 /// 1. SEMPRE envia 101 primeiro
 /// 2. SEMPRE lê do cliente
 /// 3. SEMPRE envia 200
-/// 4. Depois detecta SSH vs VPN pelo payload
+/// 4. Conecta ao backend
+/// 5. ENCAMINHA O PAYLOAD ao backend
+/// 6. Faz tunnel bidirecional
 pub async fn handle_websocket(mut socket: TcpStream, status: &str) -> Result<()> {
     info!("🌐 WebSocket/HTTP handshake (padrão BSProxy)...");
 
@@ -20,10 +22,10 @@ pub async fn handle_websocket(mut socket: TcpStream, status: &str) -> Result<()>
     info!("📤 Enviado: 101 {}", status);
 
     // PASSO 2: SEMPRE lê do cliente (payload do Injector)
-    let mut buf = [0u8; 256];
+    let mut buf = [0u8; 4096];
     let n = socket.read(&mut buf).await?;
     let payload = String::from_utf8_lossy(&buf[..n]);
-    info!("📩 Payload recebido: {}", payload.trim());
+    info!("📩 Payload recebido ({} bytes): {}", n, payload.trim());
 
     // PASSO 3: SEMPRE envia 200 OK
     let response_200 = format!("HTTP/1.1 200 {}\r\n\r\n", status);
@@ -40,41 +42,50 @@ pub async fn handle_websocket(mut socket: TcpStream, status: &str) -> Result<()>
 
     info!("🔗 Conectando ao backend: {}", addr_proxy);
 
-    let server_connect = TcpStream::connect(addr_proxy).await;
-    if server_connect.is_err() {
-        let alt = if addr_proxy == "127.0.0.1:22" { "127.0.0.1:1194" } else { "127.0.0.1:22" };
-        info!("⚠️ Falha em {}, tentando {}", addr_proxy, alt);
-        match TcpStream::connect(alt).await {
-            Ok(s) => {
-                info!("✅ Túnel iniciado para {}", alt);
-                let (cr, cw) = socket.into_split();
-                let (sr, sw) = s.into_split();
-                let cr = Arc::new(Mutex::new(cr));
-                let cw = Arc::new(Mutex::new(cw));
-                let sr = Arc::new(Mutex::new(sr));
-                let sw = Arc::new(Mutex::new(sw));
-                tokio::try_join!(transfer_data(cr, sw), transfer_data(sr, cw))?;
-                info!("🔚 Túnel finalizado.");
-                Ok(())
-            }
-            Err(e) => {
-                info!("❌ Ambos backends falharam: {}", e);
-                Ok(())
+    // PASSO 5: Conecta ao backend
+    let server_stream = match TcpStream::connect(addr_proxy).await {
+        Ok(s) => s,
+        Err(e) => {
+            let alt = if addr_proxy == "127.0.0.1:22" { "127.0.0.1:1194" } else { "127.0.0.1:22" };
+            info!("⚠️ Falha em {}: {}. Tentando {}", addr_proxy, e, alt);
+            match TcpStream::connect(alt).await {
+                Ok(s) => {
+                    info!("✅ Conectado ao fallback: {}", alt);
+                    s
+                }
+                Err(e2) => {
+                    info!("❌ Ambos backends falharam: {}, {}", e, e2);
+                    return Ok(());
+                }
             }
         }
-    } else {
-        let server_stream = server_connect?;
-        info!("✅ Túnel iniciado para {}", addr_proxy);
-        let (cr, cw) = socket.into_split();
-        let (sr, sw) = server_stream.into_split();
-        let cr = Arc::new(Mutex::new(cr));
-        let cw = Arc::new(Mutex::new(cw));
-        let sr = Arc::new(Mutex::new(sr));
-        let sw = Arc::new(Mutex::new(sw));
-        tokio::try_join!(transfer_data(cr, sw), transfer_data(sr, cw))?;
-        info!("🔚 Túnel finalizado.");
-        Ok(())
-    }
+    };
+
+    info!("✅ Conectado ao backend: {}", addr_proxy);
+
+    // PASSO 5b: ENCAMINHAR O PAYLOAD ao backend (CRUCIAL!)
+    let (mut client_r, mut client_w) = socket.into_split();
+    let (mut server_r, mut server_w) = server_stream.into_split();
+
+    // Envia o payload já lido ao backend
+    server_w.write_all(&buf[..n]).await?;
+    server_w.flush().await?;
+    info!("📤 Payload encaminhado ao backend ({} bytes)", n);
+
+    let client_r = Arc::new(Mutex::new(client_r));
+    let client_w = Arc::new(Mutex::new(client_w));
+    let server_r = Arc::new(Mutex::new(server_r));
+    let server_w = Arc::new(Mutex::new(server_w));
+
+    // PASSO 6: Tunnel bidirecional
+    info!("🔗 Túnel bidirecional iniciado");
+    tokio::try_join!(
+        transfer_data(client_r, server_w.clone()),
+        transfer_data(server_r, client_w.clone()),
+    )?;
+
+    info!("🔚 Túnel finalizado.");
+    Ok(())
 }
 
 async fn transfer_data(

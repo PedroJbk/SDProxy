@@ -12,7 +12,7 @@ use log::{info, error};
 use std::process::Command;
 
 #[derive(Parser)]
-#[command(name = "bsproxy")]
+#[command(name = "awproxy")]
 #[command(about = "Multiprotocol proxy server")]
 struct Cli {
     #[arg(short = 'p', long = "port", default_value = "8080")]
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     
     let addr = format!("0.0.0.0:{}", cli.port);
     let listener = TcpListener::bind(&addr).await?;
-    info!("🚀 BSProxy listening on {}", addr);
+    info!("🚀 AWProxy listening on {}", addr);
     info!("📡 Protocols: SOCKS5, TLS, WebSocket, SECURITY, TCP");
 
     while let Ok((socket, _)) = listener.accept().await {

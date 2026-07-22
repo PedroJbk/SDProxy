@@ -1,4 +1,4 @@
-# Análise do Protocolo xHTTP - SocksRevive XHTTP DEMO
+# Análise do Protocolo xHTTP - XHTTP DEMO
 
 ## Protocolo Real (SplitHTTP)
 

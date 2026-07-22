@@ -48,9 +48,17 @@ pub async fn handle_socks5(mut client: TcpStream) -> Result<()> {
         anyhow::bail!("Unsupported SOCKS command");
     }
 
-    info!("SOCKS5 -> {}", target_addr);
+    // Normalizar endereços locais para garantir que o SOCKS5 funcione com target local
+    let final_target = if target_addr.starts_with("0.0.0.0") || target_addr.starts_with("localhost") || target_addr.starts_with("127.0.0.1") {
+        let port = target_addr.split(':').last().unwrap_or("22");
+        format!("127.0.0.1:{}", port)
+    } else {
+        target_addr.clone()
+    };
 
-    match TcpStream::connect(&target_addr).await {
+    info!("SOCKS5 -> {}", final_target);
+
+    match TcpStream::connect(&final_target).await {
         Ok(remote) => {
             send_reply(&mut client, 0x00).await?;
             let (mut client_reader, mut client_writer) = client.into_split();

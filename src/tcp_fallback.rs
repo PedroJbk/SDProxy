@@ -6,7 +6,6 @@ use log::info;
 pub async fn handle_tcp(mut socket: TcpStream) -> Result<()> {
     info!("📦 TCP fallback - encaminhando para SSH...");
 
-    // Tentar SSH primeiro
     match TcpStream::connect("127.0.0.1:22").await {
         Ok(mut remote) => {
             info!("✅ TCP fallback -> SSH conectado");
@@ -15,7 +14,7 @@ pub async fn handle_tcp(mut socket: TcpStream) -> Result<()> {
             Ok(())
         }
         Err(_) => {
-            // Se SSH falhar, tentar VPN
+        
             info!("⚠️ SSH falhou, tentando VPN...");
             match TcpStream::connect("127.0.0.1:1194").await {
                 Ok(mut remote) => {

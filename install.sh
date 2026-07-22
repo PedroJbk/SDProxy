@@ -1,5 +1,5 @@
 #!/bin/bash
-# SDProxy Installer v2.1
+# SDProxy Installer v2.0
 set -e
 
 BLUE='\033[1;34m'
@@ -8,7 +8,6 @@ RED='\033[1;31m'
 YELLOW='\033[1;33m'
 WHITE='\033[1;37m'
 NC='\033[0m'
-BOLD='\033[1m'
 BOLD='\033[1m'
 
 RAW="https://raw.githubusercontent.com/PedroJbk/SDProxy/main"
@@ -24,29 +23,20 @@ echo -e "${WHITE}${BOLD} ╚════██║██║  ██║██╔�
 echo -e "${BLUE}${BOLD} ███████║██████╔╝██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   ${NC}"
 echo -e "${WHITE}${BOLD} ╚══════╝╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ${NC}"
 echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
-echo -e "${WHITE} Multi-Protocolo Proxy v2.1"
+echo -e "${WHITE} Multi-Protocolo Proxy v2.0"
 echo -e "${WHITE} GitHub: ${BLUE}github.com/PedroJbk/SDProxy${NC}"
 echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
 echo ""
 
-# Etapa 1: Dependências
-echo -e "${GREEN}[1/5]${NC} Verificando dependências..."
+# Etapa 1
+echo -e "${GREEN}[1/4]${NC} Verificando dependências..."
 apt-get update -qq >/dev/null 2>&1 || true
-
-if ! command -v git &> /dev/null; then
-    apt-get install -y -qq git >/dev/null 2>&1
-    echo -e "  ${GREEN}✔${NC} git instalado"
-fi
-
-if ! command -v gcc &> /dev/null; then
-    apt-get install -y -qq build-essential >/dev/null 2>&1
-    echo -e "  ${GREEN}✔${NC} build-essential instalado"
-fi
-
-if ! command -v openssl &> /dev/null; then
-    apt-get install -y -qq openssl >/dev/null 2>&1
-    echo -e "  ${GREEN}✔${NC} openssl instalado"
-fi
+for pkg in git build-essential openssl openssh-server; do
+    if ! dpkg -l | grep -q "^ii  $pkg "; then
+        apt-get install -y -qq "$pkg" >/dev/null 2>&1
+        echo -e "  ${GREEN}✔${NC} $pkg instalado"
+    fi
+done
 
 if ! command -v cargo &> /dev/null; then
     echo -e "  ${YELLOW}→${NC} Instalando Rust..."
@@ -54,26 +44,20 @@ if ! command -v cargo &> /dev/null; then
     source "$HOME/.cargo/env" 2>/dev/null || true
     export PATH="$HOME/.cargo/bin:$PATH"
     echo -e "  ${GREEN}✔${NC} Rust instalado"
-else
-    echo -e "  ${GREEN}✔${NC} Rust já instalado"
-fi
-
-if ! systemctl is-active --quiet ssh 2>/dev/null; then
-    apt-get install -y -qq openssh-server >/dev/null 2>&1 || true
-    systemctl enable ssh 2>/dev/null || true
-    systemctl start ssh 2>/dev/null || true
-    echo -e "  ${GREEN}✔${NC} SSH ativado"
 fi
 
 echo ""
 
-# Etapa 2: Download
-echo -e "${GREEN}[2/5]${NC} Baixando arquivos..."
+# Etapa 2
+echo -e "${GREEN}[2/4]${NC} Baixando arquivos..."
 rm -rf "${BUILD_DIR}"
 mkdir -p "${BUILD_DIR}/src"
 
-for file in Cargo.toml Cargo.lock src/main.rs src/xhttp.rs src/tls.rs src/protocol.rs src/websocket.rs src/security.rs src/tcp_fallback.rs src/ssh.rs src/socks5.rs src/udp.rs src/quic.rs; do
-    wget -q "${RAW}/${file}" -O "${BUILD_DIR}/${file}" 2>/dev/null
+wget -q "${RAW}/Cargo.toml" -O "${BUILD_DIR}/Cargo.toml" 2>/dev/null
+wget -q "${RAW}/Cargo.lock" -O "${BUILD_DIR}/Cargo.lock" 2>/dev/null || true
+
+for file in main.rs xhttp.rs websocket.rs security.rs tcp_fallback.rs tls.rs ssh.rs; do
+    wget -q "${RAW}/src/${file}" -O "${BUILD_DIR}/src/${file}" 2>/dev/null
 done
 
 if [ ! -f "${BUILD_DIR}/Cargo.toml" ] || [ ! -f "${BUILD_DIR}/src/main.rs" ]; then
@@ -84,9 +68,14 @@ fi
 echo -e "  ${GREEN}✔${NC} $(find ${BUILD_DIR}/src -name '*.rs' | wc -l) módulos baixados"
 echo ""
 
-# Etapa 3: Compilação
-echo -e "${GREEN}[3/5]${NC} Compilando SDProxy..."
+# Etapa 3
+echo -e "${GREEN}[3/4]${NC} Compilando..."
 cd "${BUILD_DIR}"
+
+if ! command -v cargo &> /dev/null; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+fi
+
 cargo build --release >/dev/null 2>&1
 
 if [ ! -f "${BUILD_DIR}/target/release/sdproxy" ]; then
@@ -98,8 +87,8 @@ fi
 echo -e "  ${GREEN}✔${NC} Compilado com sucesso"
 echo ""
 
-# Etapa 4: Instalação
-echo -e "${GREEN}[4/5]${NC} Instalando..."
+# Etapa 4
+echo -e "${GREEN}[4/4]${NC} Instalando..."
 mkdir -p "${INSTALL_DIR}"
 
 cp "${BUILD_DIR}/target/release/sdproxy" "${INSTALL_DIR}/proxy"
@@ -109,6 +98,7 @@ wget -q "${RAW}/menu.sh" -O "${INSTALL_DIR}/menu.sh" 2>/dev/null || true
 chmod +x "${INSTALL_DIR}/menu.sh" 2>/dev/null
 ln -sf "${INSTALL_DIR}/menu.sh" /usr/local/bin/sdproxy 2>/dev/null || true
 
+# Gerar certificados se não existirem
 if [ ! -f "${INSTALL_DIR}/cert.pem" ] || [ ! -f "${INSTALL_DIR}/key.pem" ]; then
     openssl req -x509 -newkey rsa:2048 -keyout "${INSTALL_DIR}/key.pem" \
         -out "${INSTALL_DIR}/cert.pem" -days 365 -nodes \
@@ -117,13 +107,7 @@ fi
 
 rm -rf "${BUILD_DIR}"
 
-echo -e "  ${GREEN}✔${NC} Binário instalado"
-echo -e "  ${GREEN}✔${NC} Certificados TLS gerados"
-echo ""
-
-# Etapa 5: Finalizar
-echo -e "${GREEN}[5/5]${NC} Finalizando..."
-
+# Limpar serviços antigos
 for svc in /etc/systemd/system/proxy-*.service; do
     [ -f "$svc" ] && systemctl stop "$(basename "$svc" .service)" 2>/dev/null && systemctl disable "$(basename "$svc" .service)" 2>/dev/null
 done
@@ -144,12 +128,9 @@ echo -e "  ${BLUE}${BOLD}Protocolos:${NC}"
 echo -e "    ├─ SSH Tunnel"
 echo -e "    ├─ WebSocket"
 echo -e "    ├─ ${YELLOW}xHTTP / SplitHTTP (porta 443)${NC}"
-echo -e "    ├─ TLS/SSL"
-echo -e "    ├─ SOCKS5"
-echo -e "    ├─ QUIC"
-echo -e "    └─ UDP"
+echo -e "    ├─ TLS/SSL Proxy"
+echo -e "    └─ Security Check"
 echo ""
 echo -e "  ${WHITE}${BOLD}Comando:${NC} sdproxy"
-echo -e "  ${WHITE}${BOLD}Opção:${NC} [04] xHTTP SplitHTTP"
 echo ""
 echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"

@@ -1,19 +1,13 @@
 [package]
 name = "sdproxy"
-version = "0.3.1"
+version = "2.0.0"
 edition = "2021"
 
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
-tokio-rustls = "0.26"
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.10"
-quinn = "0.11"
-rustls = { version = "0.23", features = ["ring", "std"] }
-rustls-pemfile = "2"
-rcgen = "0.13"
-lazy_static = "1.4"
 
 [[bin]]
 name = "sdproxy"

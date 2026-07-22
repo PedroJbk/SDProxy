@@ -1,4 +1,4 @@
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::TcpStream;
 use anyhow::Result;
 use log::info;
@@ -36,9 +36,9 @@ pub async fn handle_websocket(mut socket: TcpStream) -> Result<()> {
                     \r\n";
     
     socket.write_all(response.as_bytes()).await?;
-    info!("🌐 WebSocket handshake complete! Encaminhando para SSH...");
+    info!("🌐 WebSocket handshake complete!");
     
-    // Encaminhar para SSH (porta 22)
+    // Encaminhar para SSH
     let target = "127.0.0.1:22";
     
     match TcpStream::connect(target).await {
@@ -57,7 +57,24 @@ pub async fn handle_websocket(mut socket: TcpStream) -> Result<()> {
         }
         Err(e) => {
             info!("❌ Falha ao conectar ao SSH: {}", e);
-            anyhow::bail!("SSH connection failed: {}", e)
+            // Tentar VPN como fallback
+            match TcpStream::connect("127.0.0.1:1194").await {
+                Ok(remote) => {
+                    info!("✅ WebSocket -> VPN conectado");
+                    let (mut client_reader, mut client_writer) = socket.into_split();
+                    let (mut remote_reader, mut remote_writer) = remote.into_split();
+                    
+                    tokio::try_join!(
+                        tokio::io::copy(&mut client_reader, &mut remote_writer),
+                        tokio::io::copy(&mut remote_reader, &mut client_writer)
+                    )?;
+                    
+                    Ok(())
+                }
+                Err(e2) => {
+                    anyhow::bail!("WebSocket connection failed: SSH={}, VPN={}", e, e2)
+                }
+            }
         }
     }
 }

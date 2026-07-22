@@ -1,6 +1,6 @@
 [package]
-name = "awproxy"
-version = "0.1.0"
+name = "sdproxy"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -8,8 +8,7 @@ tokio = { version = "1.35", features = ["full"] }
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.10"
-clap = { version = "4.4", features = ["derive"] }
 
 [[bin]]
-name = "awproxy"
+name = "sdproxy"
 path = "src/main.rs"

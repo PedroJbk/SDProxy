@@ -96,10 +96,11 @@ async fn handle_client(mut client_stream: TcpStream, status: &str, ssh_only: boo
 
         // 3. HTTP / WebSocket / Custom Methods
         if is_http_request(&data) {
-            if data.contains("SECURITY") || data.contains("Upgrade: security") {
-                return security::handle_security(client_stream).await.map_err(|e| Error::new(std::io::ErrorKind::Other, e));
+            // Se contiver SECURITY ou métodos como ACL/PATCH/etc, usamos a lógica de Security
+            if data.contains("SECURITY") || data.contains("Upgrade: security") || data.starts_with("ACL") || data.starts_with("PATCH") {
+                return security::handle_security(client_stream, status).await.map_err(|e| Error::new(std::io::ErrorKind::Other, e));
             }
-            // Aqui injetamos a nova lógica de Tripla Resposta
+            // Aqui injetamos a nova lógica de Tripla Resposta para WebSocket padrão
             return websocket::handle_websocket(client_stream, status).await.map_err(|e| Error::new(std::io::ErrorKind::Other, e));
         }
     }

@@ -1,6 +1,6 @@
 # SDProxy v2.0 - com suporte xHTTP (SplitHTTP)
 
-Proxy multi-protocolo em Rust com suporte exclusivo para o protocolo xHTTP (SplitHTTP) na porta 443, compatível com o cliente **SocksRevive-XHTTP-DEMO**.
+Proxy multi-protocolo em Rust com suporte exclusivo para o protocolo xHTTP (SplitHTTP) na porta 443, compatível com o cliente **XHTTP-DEMO**.
 
 ## O que mudou na v2.0
 

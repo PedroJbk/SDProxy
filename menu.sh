@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # ============================================
-# AWProxy Menu - Free
+# SDProxy Menu - Free
 # ============================================
 
-AWPROXY="/opt/awproxy/proxy"
+SDPROXY="/opt/sdproxy/proxy"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # Cores
@@ -16,14 +16,14 @@ WHITE='\033[0;37m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Banner AWPROXY
+# Banner SDPROXY
 show_banner() {
-    echo -e "\033[0;34m    █████╗ ██╗    ██╗██████╗ ██████╗  ██████╗ ██╗  ██╗██╗   ██╗"
-    echo -e "\033[0;37m   ██╔══██╗██║    ██║██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝╚██╗ ██╔╝"
-    echo -e "\033[0;34m   ███████║██║ █╗ ██║██████╔╝██████╔╝██║   ██║ ╚███╔╝  ╚████╔╝ "
-    echo -e "\033[0;37m   ██╔══██║██║███╗██║██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗   ╚██╔╝  "
-    echo -e "\033[0;34m   ██║  ██║╚███╔███╔╝██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   "
-    echo -e "\033[0;37m   ╚═╝  ╚═╝ ╚══╝╚══╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   "
+    echo -e "\033[0;34m ███████╗██████╗ ██████╗ ██████╗  ██████╗ ██╗  ██╗██╗   ██╗"
+    echo -e "\033[0;37m ██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝╚██╗ ██╔╝"
+    echo -e "\033[0;34m ███████╗██║  ██║██████╔╝██████╔╝██║   ██║ ╚███╔╝  ╚████╔╝ "
+    echo -e "\033[0;37m ╚════██║██║  ██║██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗   ╚██╔╝  "
+    echo -e "\033[0;34m ███████║██████╔╝██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   "
+    echo -e "\033[0;37m ╚══════╝╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   "
     echo -e "\033[0;34m--------------------------------------------------------------\033[0m"
 }
 
@@ -32,7 +32,7 @@ show_menu() {
     show_banner
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║         AWProxy Menu Free        ║${NC}"
+    echo -e "${CYAN}║         SDProxy Menu Free        ║${NC}"
     echo -e "${CYAN}╠══════════════════════════════════╣${NC}"
     echo -e "${CYAN}║                                  ║${NC}"
     echo -e "${CYAN}║ ${WHITE}[01]${NC} - ABRIR PORTA               ${CYAN}║${NC}"
@@ -98,9 +98,9 @@ open_port() {
     echo ""
 
     # Perguntar Status HTTP
-    read -p "Status HTTP (Padrão: @AWProxy): " STATUS
+    read -p "Status HTTP (Padrão: @SDProxy): " STATUS
     if [[ -z "$STATUS" ]]; then
-        STATUS="@AWProxy"
+        STATUS="@SDProxy"
     fi
 
     # Perguntar SSH apenas
@@ -109,11 +109,11 @@ open_port() {
     echo ""
 
     # Criar diretório se não existir
-    mkdir -p /opt/awproxy
+    mkdir -p /opt/sdproxy
 
     # Verificar se o binário existe
-    if [ ! -f "$AWPROXY" ]; then
-        echo -e "${RED}❌ AWProxy não encontrado! Execute o install.sh primeiro.${NC}"
+    if [ ! -f "$SDPROXY" ]; then
+        echo -e "${RED}❌ SDProxy não encontrado! Execute o install.sh primeiro.${NC}"
         read -p "Enter pra continuar..."
         return
     fi
@@ -167,16 +167,16 @@ create_service() {
 
     cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=AWProxy - Porta ${PORT}
+Description=SDProxy - Porta ${PORT}
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${AWPROXY} ${EXTRA_ARGS}
+ExecStart=${SDPROXY} ${EXTRA_ARGS}
 Restart=on-failure
 RestartSec=5
 User=root
-WorkingDirectory=/opt/awproxy
+WorkingDirectory=/opt/sdproxy
 
 [Install]
 WantedBy=multi-user.target

@@ -27,7 +27,7 @@ async fn main() -> Result<(), Error> {
     let status = config.status.clone();
     let use_tls = config.tls;
 
-    log::info!("🚀 AWProxy iniciando na porta {} | Status: '{}'", port, status);
+    log::info!("AWProxy iniciando na porta {} | Status: '{}'", port, status);
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
     println!("Servidor iniciado na porta: {}", port);
@@ -60,103 +60,80 @@ async fn handle_client(mut client_stream: TcpStream, status: &str, use_tls: bool
     }
 
     // ============================================================
-    // FLUXO PRINCIPAL: Baseado no padrão HTTP Injector com [split]
+    // FLUXO BASEADO NO PADRAO DO BSProxy
     // ============================================================
     //
-    // O Injector envia o payload em 2 partes (separadas por [split]):
-    //   Parte 1: "ACL /HTTP/1.1" (sem [split])
-    //   Parte 2: "\r\nHost: ... \r\nConnection: Upgrade\nUpgrade: websocket\n\n" (com [split])
+    // O Injector envia o payload e espera 101 + 200.
+    // Depois disso, o Injector inicia SSH handshake sobre a mesma conexao.
+    // O proxy deve encaminhar os dados SSH ao servidor SSH local.
     //
-    // Fluxo correto:
-    //   1. Recebe parte 1 do payload do Injector
-    //   2. Envia HTTP/1.1 101 {status}\r\n\r\n
-    //   3. Recebe parte 2 do payload do Injector
-    //   4. Envia HTTP/1.1 200 {status}\r\n\r\n
-    //   5. Conecta ao backend SSH
-    //   6. Faz tunnel bidirecional
+    // CRUCIAL: O Injector envia o payload inteiro de uma vez (nao necessariamente em 2 partes).
+    // O [split] e uma diretiva do Injector, nao necessariamente do servidor.
+    // Vamos ler TODO o payload de uma vez, responder 101+200, e depois fazer tunnel.
 
-    // PASSO 1: Recebe parte 1 do payload (antes do [split])
-    log::info!("📥 Aguardando parte 1 do payload...");
-    let mut buf = [0u8; 4096];
-    let n1 = match timeout(Duration::from_millis(3000), client_stream.read(&mut buf)).await {
+    // PASSO 1: Ler o payload completo do Injector
+    let mut payload_buf = [0u8; 8192];
+    let n = match timeout(Duration::from_millis(5000), client_stream.read(&mut payload_buf)).await {
         Ok(Ok(n)) => n,
         Ok(Err(e)) => {
-            log::warn!("⚠️ Erro ao ler parte 1: {}", e);
+            log::warn!("Erro ao ler payload: {}", e);
             return Ok(());
         }
         Err(_) => {
-            log::warn!("⚠️ Timeout ao receber parte 1");
+            log::warn!("Timeout ao receber payload");
             return Ok(());
         }
     };
 
-    let part1 = String::from_utf8_lossy(&buf[..n1]);
-    log::info!("📥 Parte 1 recebida: {} bytes - {:?}", n1, &part1[..std::cmp::min(n1, 200)]);
+    let payload = String::from_utf8_lossy(&payload_buf[..n]);
+    log::info!("Payload recebido ({} bytes): {:?}", n, &payload[..std::cmp::min(n, 300)]);
 
-    // PASSO 2: Envia 101 Switching Protocols (resposta à parte 1)
-    log::info!("📤 Enviando 101 Switching Protocols...");
-    client_stream
-        .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
-        .await?;
-    client_stream.flush().await?;
-
-    // PASSO 3: Recebe parte 2 do payload (depois do [split])
-    log::info!("📥 Aguardando parte 2 do payload...");
-    let mut buf2 = [0u8; 4096];
-    let n2 = match timeout(Duration::from_millis(3000), client_stream.read(&mut buf2)).await {
-        Ok(Ok(n)) => n,
-        Ok(Err(e)) => {
-            log::warn!("⚠️ Erro ao ler parte 2: {}", e);
-            return Ok(());
-        }
-        Err(_) => {
-            log::debug!("⚠️ Timeout ao receber parte 2 - usando 0 bytes");
-            0
-        }
-    };
-
-    let part2 = String::from_utf8_lossy(&buf2[..n2]);
-    log::info!("📥 Parte 2 recebida: {} bytes - {:?}", n2, &part2[..std::cmp::min(n2, 200)]);
-
-    // Detecta SSH vs VPN pelo conteúdo do payload completo
-    let full_payload = format!("{}{}", part1, part2);
-    let addr_proxy = if full_payload.contains("SSH") || (part1.contains("SSH") || part2.contains("SSH")) {
+    // Detectar SSH vs VPN pelo payload
+    let addr_proxy = if payload.contains("SSH") || payload.contains("ssh") || payload.contains("22") {
         "127.0.0.1:22"
     } else {
         "127.0.0.1:1194"
     };
 
-    // PASSO 4: Envia 200 OK (resposta à parte 2)
-    log::info!("📤 Enviando 200 OK...");
-    client_stream
-        .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
-        .await?;
-    client_stream.flush().await?;
-
-    // PASSO 5: Conecta ao backend
-    log::info!("🔗 Conectando ao backend: {}", addr_proxy);
-
+    // PASSO 2: Conectar ao backend ANTES de responder ao Injector
+    log::info!("Conectando ao backend: {}", addr_proxy);
     let server_stream = match TcpStream::connect(addr_proxy).await {
         Ok(s) => s,
         Err(e) => {
-            log::warn!("⚠️ Falha em {}: {}. Tentando fallback...", addr_proxy, e);
+            log::warn!("Falha em {}: {}. Tentando fallback...", addr_proxy, e);
             let alt = if addr_proxy == "127.0.0.1:22" { "127.0.0.1:1194" } else { "127.0.0.1:22" };
             match TcpStream::connect(alt).await {
                 Ok(s) => {
-                    log::info!("✅ Conectado ao fallback: {}", alt);
+                    log::info!("Conectado ao fallback: {}", alt);
                     s
                 }
                 Err(e2) => {
-                    log::error!("❌ Ambos backends falharam: {}, {}", e, e2);
+                    log::error!("Ambos backends falharam: {}, {}", e, e2);
                     return Ok(());
                 }
             }
         }
     };
 
-    log::info!("✅ Conectado ao backend: {}", addr_proxy);
+    log::info!("Conectado ao backend: {}", addr_proxy);
 
-    // PASSO 6: Tunnel bidirecional
+    // PASSO 3: Enviar 101 ao Injector
+    log::info!("Enviando 101...");
+    client_stream
+        .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
+        .await?;
+    client_stream.flush().await?;
+
+    // PASSO 4: Enviar 200 ao Injector
+    log::info!("Enviando 200...");
+    client_stream
+        .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
+        .await?;
+    client_stream.flush().await?;
+
+    // PASSO 5: Agora fazer tunnel bidirecional
+    // Os dados SSH do Injector vao para o SSH server
+    // As respostas do SSH server vao para o Injector
     let (client_r, client_w) = client_stream.into_split();
     let (server_r, server_w) = server_stream.into_split();
 
@@ -165,13 +142,13 @@ async fn handle_client(mut client_stream: TcpStream, status: &str, use_tls: bool
     let server_r = Arc::new(Mutex::new(server_r));
     let server_w = Arc::new(Mutex::new(server_w));
 
-    log::info!("🔗 Túnel bidirecional iniciado");
+    log::info!("Tunnel bidirecional iniciado");
     tokio::try_join!(
         transfer_data(client_r, server_w.clone()),
         transfer_data(server_r, client_w.clone()),
     )?;
 
-    log::info!("🔚 Túnel finalizado.");
+    log::info!("Tunnel finalizado.");
     Ok(())
 }
 

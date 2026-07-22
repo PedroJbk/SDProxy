@@ -38,10 +38,11 @@ async fn main() -> Result<(), Error> {
 
 async fn start_proxy(listener: TcpListener, status: String, ssh_only: bool, use_tls: bool) {
     loop {
+        let status_clone = status.clone();
         match listener.accept().await {
             Ok((client_stream, addr)) => {
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(client_stream, &status, ssh_only, use_tls).await {
+                    if let Err(e) = handle_client(client_stream, &status_clone, ssh_only, use_tls).await {
                         eprintln!("Erro ao processar cliente {}: {}", addr, e);
                     }
                 });

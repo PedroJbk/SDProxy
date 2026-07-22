@@ -5,31 +5,34 @@ use tokio::sync::Mutex;
 use anyhow::Result;
 use log::info;
 
+/// Handle SECURITY - SEGUE O PADRÃO EXATO DO BSPROXY:
+/// 1. SEMPRE envia 101 primeiro
+/// 2. SEMPRE lê do cliente
+/// 3. SEMPRE envia 200
+/// 4. Depois detecta SSH vs VPN pelo payload
 pub async fn handle_security(mut socket: TcpStream, status: &str) -> Result<()> {
-    info!("🔐 SECURITY handshake...");
+    info!("🔐 SECURITY handshake (padrão BSProxy)...");
 
-    // 1. Enviar 101 Switching Protocols (como no BSProxy)
-    socket
-        .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
-        .await?;
-    info!("📤 SECURITY: 101 {}", status);
+    // PASSO 1: SEMPRE envia 101 Switching Protocols primeiro
+    let response_101 = format!("HTTP/1.1 101 {}\r\n\r\n", status);
+    socket.write_all(response_101.as_bytes()).await?;
+    socket.flush().await?;
+    info!("📤 Enviado: 101 {}", status);
 
-    // 2. Ler payload do Injector
+    // PASSO 2: SEMPRE lê do cliente (payload do Injector)
     let mut buf = [0u8; 256];
     let n = socket.read(&mut buf).await?;
-    let data = String::from_utf8_lossy(&buf[..n]);
-    info!("📩 SECURITY payload: {}", data.trim());
+    let payload = String::from_utf8_lossy(&buf[..n]);
+    info!("📩 SECURITY payload: {}", payload.trim());
 
-    // 3. Enviar 200 OK com Upgrade (como no BSProxy)
-    let response = format!("HTTP/1.1 200 {}\r\n\
-                            Connection: Upgrade\r\n\
-                            Upgrade: security\r\n\
-                            \r\n", status);
-    socket.write_all(response.as_bytes()).await?;
-    info!("🔐 SECURITY complete! Status: {}", status);
+    // PASSO 3: SEMPRE envia 200 OK
+    let response_200 = format!("HTTP/1.1 200 {}\r\n\r\n", status);
+    socket.write_all(response_200.as_bytes()).await?;
+    socket.flush().await?;
+    info!("📤 Enviado: 200 {}", status);
 
-    // 4. Detectar backend: se contém "SSH" ou está vazio, usa SSH; senão VPN
-    let addr_proxy = if data.contains("SSH") || data.is_empty() {
+    // PASSO 4: Detecta backend pelo payload - SSH vs VPN
+    let addr_proxy = if payload.contains("SSH") || payload.is_empty() {
         "127.0.0.1:22"
     } else {
         "127.0.0.1:1194"

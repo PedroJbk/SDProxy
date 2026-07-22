@@ -7,7 +7,7 @@ pub async fn handle_ssh_tunnel(
     mut client_stream: TcpStream,
     target_addr: &str,
 ) -> Result<(), Box<dyn Error>> {
-    info!("SSH Tunnel para {}", target_addr);
+    info!("🔑 SSH Tunnel para {}", target_addr);
 
     let mut server_stream = TcpStream::connect(target_addr).await?;
     copy_bidirectional(&mut client_stream, &mut server_stream).await?;

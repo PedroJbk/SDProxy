@@ -22,9 +22,9 @@ pub async fn handle_security(mut socket: TcpStream) -> Result<()> {
     
     // Encaminhar para SSH após handshake SECURITY
     match TcpStream::connect("127.0.0.1:22").await {
-        Ok(remote) => {
+        Ok(mut remote) => {
             info!("✅ SECURITY -> SSH conectado");
-            let _ = copy_bidirectional(&mut socket, &remote).await;
+            let _ = copy_bidirectional(&mut socket, &mut remote).await;
             info!("🔚 Conexão SECURITY->SSH encerrada");
             Ok(())
         }

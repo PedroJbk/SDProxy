@@ -60,68 +60,82 @@ async fn handle_client(mut client_stream: TcpStream, status: &str, use_tls: bool
     }
 
     // ============================================================
-    // FLUXO PRINCIPAL: Baseado no BSProxy que funciona perfeitamente
+    // FLUXO PRINCIPAL: Baseado no padrão HTTP Injector com [split]
     // ============================================================
     //
-    // O payload HTTP do Injector é APENAS o handshake para estabelecer o tunnel.
-    // O SSH server na porta 22 é OpenSSH puro - ele NÃO espera receber HTTP.
-    // Depois do handshake 101+200, o tunnel é bidirecional entre Injector e SSH.
+    // O Injector envia o payload em 2 partes (separadas por [split]):
+    //   Parte 1: "ACL /HTTP/1.1" (sem [split])
+    //   Parte 2: "\r\nHost: ... \r\nConnection: Upgrade\nUpgrade: websocket\n\n" (com [split])
     //
-    // 1. Envia HTTP/1.1 101 {status}\r\n\r\n
-    // 2. Lê payload HTTP do Injector (handshake - NÃO enviar ao SSH!)
-    // 3. Envia HTTP/1.1 200 {status}\r\n\r\n
-    // 4. Conecta ao backend SSH
-    // 5. Faz tunnel bidirecional (sem enviar payload ao SSH)
+    // Fluxo correto:
+    //   1. Recebe parte 1 do payload do Injector
+    //   2. Envia HTTP/1.1 101 {status}\r\n\r\n
+    //   3. Recebe parte 2 do payload do Injector
+    //   4. Envia HTTP/1.1 200 {status}\r\n\r\n
+    //   5. Conecta ao backend SSH
+    //   6. Faz tunnel bidirecional
 
-    // PASSO 1: SEMPRE envia 101 Switching Protocols primeiro
+    // PASSO 1: Recebe parte 1 do payload (antes do [split])
+    log::info!("📥 Aguardando parte 1 do payload...");
+    let mut buf = [0u8; 4096];
+    let n1 = match timeout(Duration::from_millis(3000), client_stream.read(&mut buf)).await {
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) => {
+            log::warn!("⚠️ Erro ao ler parte 1: {}", e);
+            return Ok(());
+        }
+        Err(_) => {
+            log::warn!("⚠️ Timeout ao receber parte 1");
+            return Ok(());
+        }
+    };
+
+    let part1 = String::from_utf8_lossy(&buf[..n1]);
+    log::info!("📥 Parte 1 recebida: {} bytes - {:?}", n1, &part1[..std::cmp::min(n1, 200)]);
+
+    // PASSO 2: Envia 101 Switching Protocols (resposta à parte 1)
     log::info!("📤 Enviando 101 Switching Protocols...");
     client_stream
         .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
         .await?;
     client_stream.flush().await?;
 
-    // PASSO 2: SEMPRE lê do cliente (payload HTTP do Injector = handshake)
-    // Este payload é APENAS para o handshake, NÃO deve ser enviado ao SSH server!
-    let mut payload_buf = vec![0u8; 4096];
-    let bytes_read = match timeout(Duration::from_millis(2000), client_stream.read(&mut payload_buf)).await {
+    // PASSO 3: Recebe parte 2 do payload (depois do [split])
+    log::info!("📥 Aguardando parte 2 do payload...");
+    let mut buf2 = [0u8; 4096];
+    let n2 = match timeout(Duration::from_millis(3000), client_stream.read(&mut buf2)).await {
         Ok(Ok(n)) => n,
         Ok(Err(e)) => {
-            log::warn!("⚠️ Erro ao ler payload: {}", e);
-            0
+            log::warn!("⚠️ Erro ao ler parte 2: {}", e);
+            return Ok(());
         }
         Err(_) => {
-            log::debug!("⚠️ Timeout ao ler payload");
+            log::debug!("⚠️ Timeout ao receber parte 2 - usando 0 bytes");
             0
         }
     };
 
-    let payload = String::from_utf8_lossy(&payload_buf[..bytes_read]);
-    log::info!("📩 Payload handshake lido: {} bytes - {:?}", bytes_read, &payload[..std::cmp::min(bytes_read, 200)]);
+    let part2 = String::from_utf8_lossy(&buf2[..n2]);
+    log::info!("📥 Parte 2 recebida: {} bytes - {:?}", n2, &part2[..std::cmp::min(n2, 200)]);
 
-    // PASSO 3: SEMPRE envia 200 OK
+    // Detecta SSH vs VPN pelo conteúdo do payload completo
+    let full_payload = format!("{}{}", part1, part2);
+    let addr_proxy = if full_payload.contains("SSH") || (part1.contains("SSH") || part2.contains("SSH")) {
+        "127.0.0.1:22"
+    } else {
+        "127.0.0.1:1194"
+    };
+
+    // PASSO 4: Envia 200 OK (resposta à parte 2)
     log::info!("📤 Enviando 200 OK...");
     client_stream
         .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
         .await?;
     client_stream.flush().await?;
 
-    // PASSO 4: Detecta backend e conecta
-    if bytes_read == 0 {
-        // Sem payload - fallback para TCP puro
-        log::info!("📦 Sem payload - TCP fallback");
-        return tcp_fallback::handle_tcp(client_stream).await.map_err(|e| Error::new(std::io::ErrorKind::Other, e));
-    }
-
-    // Detecta SSH vs VPN pelo conteúdo do payload
-    let addr_proxy = if payload.contains("SSH") || payload.is_empty() {
-        "127.0.0.1:22"
-    } else {
-        "127.0.0.1:1194"
-    };
-
-    log::info!("🔗 Backend detectado: {}", addr_proxy);
-
     // PASSO 5: Conecta ao backend
+    log::info!("🔗 Conectando ao backend: {}", addr_proxy);
+
     let server_stream = match TcpStream::connect(addr_proxy).await {
         Ok(s) => s,
         Err(e) => {
@@ -143,18 +157,15 @@ async fn handle_client(mut client_stream: TcpStream, status: &str, use_tls: bool
     log::info!("✅ Conectado ao backend: {}", addr_proxy);
 
     // PASSO 6: Tunnel bidirecional
-    // O payload HTTP NÃO é enviado ao SSH - é apenas o handshake!
-    // O SSH server espera dados SSH, não HTTP.
-    // O Injector agora envia dados SSH pelo tunnel.
-    let (mut client_r, mut client_w) = client_stream.into_split();
-    let (mut server_r, mut server_w) = server_stream.into_split();
+    let (client_r, client_w) = client_stream.into_split();
+    let (server_r, server_w) = server_stream.into_split();
 
     let client_r = Arc::new(Mutex::new(client_r));
     let client_w = Arc::new(Mutex::new(client_w));
     let server_r = Arc::new(Mutex::new(server_r));
     let server_w = Arc::new(Mutex::new(server_w));
 
-    log::info!("🔗 Túnel bidirecional iniciado (payload HTTP descartado - apenas handshake)");
+    log::info!("🔗 Túnel bidirecional iniciado");
     tokio::try_join!(
         transfer_data(client_r, server_w.clone()),
         transfer_data(server_r, client_w.clone()),

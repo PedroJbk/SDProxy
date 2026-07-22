@@ -35,17 +35,21 @@ pub fn detect_protocol(data: &str) -> String {
     }
 
     // HTTP methods com headers de segurança/xHTTP-like
-    if data.starts_with("CONNECT") || data.starts_with("PROXY") ||
-       data.contains("X-Status") || data.contains("X-Protocol") ||
+    if data.contains("X-Status") || data.contains("X-Protocol") ||
        data.contains("Sec-WebSocket-Protocol") {
         return "SECURITY".to_string();
     }
 
-    // HTTP genérico
+    // HTTP genérico (GET/POST) → xHTTP/SplitHTTP
+    // O SocksRevive usa GET /path/session-id e POST /path/session-id/seq
     if data.starts_with("GET ") || data.starts_with("POST ") ||
        data.starts_with("PUT ") || data.starts_with("DELETE ") ||
-       data.starts_with("HEAD ") || data.starts_with("OPTIONS ") ||
-       data.starts_with("HTTP/") {
+       data.starts_with("HEAD ") || data.starts_with("OPTIONS ") {
+        return "XHTTP".to_string();
+    }
+
+    // HTTP response ou HTTP/1.1
+    if data.starts_with("HTTP/") {
         return "HTTP".to_string();
     }
 

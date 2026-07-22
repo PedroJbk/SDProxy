@@ -6,12 +6,11 @@ use anyhow::Result;
 use log::info;
 
 /// Handle SECURITY - SEGUE O PADRÃO EXATO DO BSPROXY:
-/// 1. SEMPRE envia 101 primeiro
-/// 2. SEMPRE lê do cliente
-/// 3. SEMPRE envia 200
+/// 1. Envia 101
+/// 2. Lê payload (handshake apenas)
+/// 3. Envia 200
 /// 4. Conecta ao backend
-/// 5. ENCAMINHA O PAYLOAD ao backend
-/// 6. Faz tunnel bidirecional
+/// 5. Tunnel bidirecional (payload NÃO enviado ao SSH)
 pub async fn handle_security(mut socket: TcpStream, status: &str) -> Result<()> {
     info!("🔐 SECURITY handshake (padrão BSProxy)...");
 
@@ -21,11 +20,11 @@ pub async fn handle_security(mut socket: TcpStream, status: &str) -> Result<()> 
     socket.flush().await?;
     info!("📤 Enviado: 101 {}", status);
 
-    // PASSO 2: SEMPRE lê do cliente (payload do Injector)
+    // PASSO 2: SEMPRE lê do cliente (payload HTTP = handshake)
     let mut buf = [0u8; 4096];
     let n = socket.read(&mut buf).await?;
     let payload = String::from_utf8_lossy(&buf[..n]);
-    info!("📩 SECURITY payload ({} bytes): {}", n, payload.trim());
+    info!("📩 SECURITY payload handshake ({} bytes): {}", n, payload.trim());
 
     // PASSO 3: SEMPRE envia 200 OK
     let response_200 = format!("HTTP/1.1 200 {}\r\n\r\n", status);
@@ -33,7 +32,7 @@ pub async fn handle_security(mut socket: TcpStream, status: &str) -> Result<()> 
     socket.flush().await?;
     info!("📤 Enviado: 200 {}", status);
 
-    // PASSO 4: Detecta backend pelo payload - SSH vs VPN
+    // PASSO 4: Detecta backend pelo payload
     let addr_proxy = if payload.contains("SSH") || payload.is_empty() {
         "127.0.0.1:22"
     } else {
@@ -63,21 +62,16 @@ pub async fn handle_security(mut socket: TcpStream, status: &str) -> Result<()> 
 
     info!("✅ Conectado ao backend: {}", addr_proxy);
 
-    // PASSO 5b: ENCAMINHAR O PAYLOAD ao backend (CRUCIAL!)
-    let (mut client_r, mut client_w) = socket.into_split();
-    let (mut server_r, mut server_w) = server_stream.into_split();
-
-    // Envia o payload já lido ao backend
-    server_w.write_all(&buf[..n]).await?;
-    server_w.flush().await?;
-    info!("📤 Payload encaminhado ao backend ({} bytes)", n);
+    // PASSO 6: Tunnel bidirecional
+    // O payload HTTP é APENAS handshake, NÃO é enviado ao SSH!
+    let (client_r, client_w) = socket.into_split();
+    let (server_r, server_w) = server_stream.into_split();
 
     let client_r = Arc::new(Mutex::new(client_r));
     let client_w = Arc::new(Mutex::new(client_w));
     let server_r = Arc::new(Mutex::new(server_r));
     let server_w = Arc::new(Mutex::new(server_w));
 
-    // PASSO 6: Tunnel bidirecional
     info!("🔗 Túnel bidirecional iniciado");
     tokio::try_join!(
         transfer_data(client_r, server_w.clone()),

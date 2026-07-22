@@ -81,5 +81,19 @@ fn get_port() -> u16 {
 }
 
 fn get_status() -> String {
-    env::args().nth(4).unwrap_or_else(|| "AWPROXY".to_string())
+    let status = env::args().nth(4).unwrap_or_else(|| "200 OK".to_string());
+match status.as_str() {
+        "101" => "101 Switching Protocols".to_string(),
+        "200" => "200 OK".to_string(),
+        "301" => "301 Moved Permanently".to_string(),
+        "302" => "302 Found".to_string(),
+        "400" => "400 Bad Request".to_string(),
+        "401" => "401 Unauthorized".to_string(),
+        "403" => "403 Forbidden".to_string(),
+        "404" => "404 Not Found".to_string(),
+        "500" => "500 Internal Server Error".to_string(),
+        "502" => "502 Bad Gateway".to_string(),
+        _ if status.contains(' ') => status,
+        _ => status
+    }
 }

@@ -5,11 +5,9 @@ use tokio::sync::Mutex;
 use anyhow::Result;
 use log::info;
 
-/// Handle TLS connections - passthrough to backend
 pub async fn handle_tls(socket: TcpStream) -> Result<()> {
     info!("🛡️ TLS detected - passthrough to backend...");
 
-    // Tentar SSH primeiro (Porta 22)
     match TcpStream::connect("127.0.0.1:22").await {
         Ok(remote) => {
             info!("✅ TLS -> SSH:22 connected");
@@ -23,7 +21,7 @@ pub async fn handle_tls(socket: TcpStream) -> Result<()> {
             Ok(())
         }
         Err(_) => {
-            // Se SSH falhar, tentar VPN (Porta 1194)
+            
             match TcpStream::connect("127.0.0.1:1194").await {
                 Ok(remote) => {
                     info!("✅ TLS -> VPN:1194 connected");

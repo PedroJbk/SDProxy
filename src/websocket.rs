@@ -1,9 +1,9 @@
-use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use anyhow::Result;
 use log::info;
 
-/// Lê e descarta os headers HTTP até encontrar \r\n\r\n
+/// Lê e descarta os headers HTTP até encontrar \r\n\r\n ou \n\n (comum em payloads do HTTP Injector)
 async fn consume_http_headers(socket: &mut TcpStream) -> std::io::Result<()> {
     let mut buf: Vec<u8> = Vec::new();
     let mut tmp = [0u8; 1];
@@ -12,7 +12,12 @@ async fn consume_http_headers(socket: &mut TcpStream) -> std::io::Result<()> {
         socket.read_exact(&mut tmp).await?;
         buf.push(tmp[0]);
 
+        // Detectar \r\n\r\n
         if buf.len() >= 4 && &buf[buf.len() - 4..] == b"\r\n\r\n" {
+            break;
+        }
+        // Detectar \n\n (payloads customizados)
+        if buf.len() >= 2 && &buf[buf.len() - 2..] == b"\n\n" {
             break;
         }
         if buf.len() > 8192 {
@@ -25,20 +30,25 @@ async fn consume_http_headers(socket: &mut TcpStream) -> std::io::Result<()> {
 pub async fn handle_websocket(mut socket: TcpStream) -> Result<()> {
     info!("🌐 WebSocket/HTTP handshake...");
     
-    // Consumir headers HTTP (qualquer método)
+    // Consumir headers HTTP
     consume_http_headers(&mut socket).await?;
     
+    // Resposta solicitada: 200 OK seguido de 101 Switching Protocols
+    // Alguns injectores esperam o 200 OK antes do upgrade
+    let response_200 = "HTTP/1.1 200 OK\r\n\r\n";
+    socket.write_all(response_200.as_bytes()).await?;
+
     // Resposta de upgrade WebSocket (101 Switching Protocols)
-    let response = "HTTP/1.1 101 Switching Protocols\r\n\
-                    Upgrade: websocket\r\n\
-                    Connection: Upgrade\r\n\
-                    Sec-WebSocket-Accept: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-                    \r\n";
+    let response_101 = "HTTP/1.1 101 Switching Protocols\r\n\
+                        Upgrade: websocket\r\n\
+                        Connection: Upgrade\r\n\
+                        Sec-WebSocket-Accept: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                        \r\n";
     
-    socket.write_all(response.as_bytes()).await?;
+    socket.write_all(response_101.as_bytes()).await?;
     info!("🌐 WebSocket handshake complete!");
     
-    // Encaminhar para SSH
+    // Encaminhar para SSH local
     let target = "127.0.0.1:22";
     
     match TcpStream::connect(target).await {

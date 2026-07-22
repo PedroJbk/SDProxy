@@ -1,79 +1,54 @@
-use tokio::net::UdpSocket;
-use anyhow::Result;
-use log::info;
-/// Handler para proxy UDP.
-/// Recebe datagramas UDP na porta configurada e encaminha para o backend.
-/// Suporta múltiplos clientes simultâneos.
-pub async fn handle_udp_listener(port: u16, ssh_only: bool) -> Result<()> {
-    info!("📡 Iniciando listener UDP na porta {}", port);
+//! UDP Handler
+//! Recebe pacotes UDP e encaminha para SSH via TCP ou UDPGW
 
-    let socket = UdpSocket::bind(format!("[::]:{}", port)).await?;
-    info!("✅ UDP listener ativo na porta {}", port);
+use std::io::Error;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::Mutex;
 
-    let mut buf = [0u8; 65535];
-    let backend_ssh = "127.0.0.1:22";
-    let backend_vpn = "127.0.0.1:1194";
+pub async fn handle_udp_listener(
+    port: u16,
+    ssh_only: bool,
+) -> Result<(), Error> {
+    println!("[UDP] Listener rodando na porta: {}", port);
+
+    let addr = format!("[::]:{}", port);
+    let socket = UdpSocket::bind(&addr).await?;
+
+    let mut buf = [0u8; 65536];
 
     loop {
-        let (len, addr) = socket.recv_from(&mut buf).await?;
-        let data = &buf[..len];
+        match socket.recv_from(&mut buf).await {
+            Ok((len, src_addr)) => {
+                if len > 0 {
+                    println!("[UDP] Recebido {} bytes de {}", len, src_addr);
 
-        // Determinar backend baseado no conteúdo
-        let target = if ssh_only {
-            backend_ssh
-        } else {
-            // Se começa com SSH, vai para SSH, senão VPN
-            if data.starts_with(b"SSH") {
-                backend_ssh
-            } else {
-                backend_vpn
+                    if ssh_only {
+                        // Encaminhar para SSH via TCP
+                        let _ = handle_udp_to_ssh(&buf[..len]).await;
+                    } else {
+                        // Encaminhar para VPN (UDPGW)
+                        let _ = handle_udp_to_udpgw(&buf[..len]).await;
+                    }
+                }
             }
-        };
-
-        // Encaminhar para o backend e esperar resposta
-        let response = forward_udp(data, target).await;
-
-        if let Ok(resp) = response {
-            let _ = socket.send_to(&resp, addr).await;
+            Err(e) => {
+                println!("[UDP] Erro: {}", e);
+            }
         }
     }
 }
 
-/// Encaminha um datagrama UDP para o backend e retorna a resposta
-async fn forward_udp(data: &[u8], target: &str) -> Result<Vec<u8>> {
-    let socket = UdpSocket::bind("127.0.0.1:0").await?;
-    socket.connect(target).await?;
-    socket.send(data).await?;
-
-    let mut buf = [0u8; 65535];
-    let timeout = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        socket.recv(&mut buf),
-    ).await;
-
-    match timeout {
-        Ok(Ok(n)) => Ok(buf[..n].to_vec()),
-        Ok(Err(e)) => Err(e.into()),
-        Err(_) => {
-            info!("⏱️ Timeout UDP para {}", target);
-            Err(anyhow::anyhow!("Timeout"))
-        }
-    }
+async fn handle_udp_to_ssh(data: &[u8]) -> Result<(), Error> {
+    let mut stream = TcpStream::connect("127.0.0.1:22").await?;
+    stream.write_all(data).await?;
+    Ok(())
 }
 
-/// Proxy UDP bidirecional para uma conexão específica
-pub async fn handle_udp_connection(
-    data: &[u8],
-    _client_addr: std::net::SocketAddr,
-    ssh_only: bool,
-) -> Result<Vec<u8>> {
-    let target = if ssh_only {
-        "127.0.0.1:22"
-    } else if data.starts_with(b"SSH") {
-        "127.0.0.1:22"
-    } else {
-        "127.0.0.1:1194"
-    };
-
-    forward_udp(data, target).await
+async fn handle_udp_to_udpgw(data: &[u8]) -> Result<(), Error> {
+    let addr = "127.0.0.1:1194";
+    let socket = UdpSocket::bind("[::]:0").await?;
+    socket.send_to(data, addr).await?;
+    Ok(())
 }

@@ -1,106 +1,130 @@
 #!/bin/bash
-# SDProxy Installer - Professional Version
 
-REPO_URL="https://github.com/PedroJbk/SDProxy.git"
-REPO_BRANCH="main"
-CMD_NAME="sdproxy"
-TOTAL_STEPS=7 # Adjusted total steps for a cleaner flow
-CURRENT_STEP=0
+# ============================================
+# SDProxy Install Script v2.0
+# Compila e instala o SDProxy com suporte xHTTP
+# ============================================
 
-# --- Cores e Estilos ---
-GREEN="\033[0;32m"
-BLUE="\033[0;34m"
-RED="\033[0;31m"
-NC="\033[0m" # No Color
-BOLD="\033[1m"
+set -e
 
-# --- Funções de Feedback ---
-log_info() {
-    echo -e "${BLUE}${BOLD}[INFO]${NC} $1"
-}
+SDPROXY="/opt/sdproxy"
+PROXY_BIN="${SDPROXY}/proxy"
+CERT_DIR="${SDPROXY}"
+SERVICE_DIR="/etc/systemd/system"
 
-log_success() {
-    echo -e "${GREEN}${BOLD}[SUCESSO]${NC} $1"
-}
+# Cores
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
 
-log_error() {
-    echo -e "${RED}${BOLD}[ERRO]${NC} $1"
-    exit 1
-}
+echo -e "${CYAN}╔══════════════════════════════════╗${NC}"
+echo -e "${CYAN}║      SDProxy Install v2.0        ║${NC}"
+echo -e "${CYAN}║   + xHTTP SplitHTTP Support      ║${NC}"
+echo -e "${CYAN}╚══════════════════════════════════╝${NC}"
+echo ""
 
-show_progress() {
-    CURRENT_STEP=$((CURRENT_STEP + 1))
-    PERCENT=$((CURRENT_STEP * 100 / TOTAL_STEPS))
-    log_info "${PERCENT}% - $1"
-}
-
-# --- Verificação de Root ---
-if [ "$EUID" -ne 0 ]; then
-    log_error "Este script precisa ser executado como ROOT. Use 'sudo su' ou 'sudo bash install.sh'."
-fi
-
-clear
-echo -e "${BLUE}${BOLD} ███████╗██████╗ ██████╗ ██████╗  ██████╗ ██╗  ██╗██╗   ██╗"
-echo -e "${NC} ██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝╚██╗ ██╔╝"
-echo -e "${BLUE}${BOLD} ███████╗██║  ██║██████╔╝██████╔╝██║   ██║ ╚███╔╝  ╚████╔╝ "
-echo -e "${NC} ╚════██║██║  ██║██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗   ╚██╔╝  "
-echo -e "${BLUE}${BOLD} ███████║██████╔╝██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   "
-echo -e "${NC} ╚══════╝╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   "
-echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
-log_info "Iniciando instalação do SDProxy..."
-
-# --- Etapa 1: Atualizar e Instalar Dependências ---
-show_progress "Atualizando repositórios e instalando dependências essenciais..."
-apt update -y > /dev/null 2>&1 || log_error "Falha ao atualizar repositórios."
-apt install -y curl build-essential git lsb-release libssl-dev pkg-config > /dev/null 2>&1 || log_error "Falha ao instalar dependências. Verifique sua conexão com a internet."
-
-# --- Etapa 2: Instalar Rust ---
-show_progress "Verificando e instalando o Rust (pode levar alguns minutos)..."
+# Verificar Rust
 if ! command -v cargo &> /dev/null; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y > /dev/null 2>&1
-    # Source cargo env to make it available in the current shell
-    source "$HOME/.cargo/env" || log_error "Falha ao configurar o ambiente Rust."
+    echo -e "${YELLOW}Instalando Rust...${NC}"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source $HOME/.cargo/env
+fi
+
+# Criar diretório
+mkdir -p "${SDPROXY}"
+
+# Verificar dependências
+echo -e "${GREEN}Verificando dependências...${NC}"
+
+# Verificar openssl
+if ! command -v openssl &> /dev/null; then
+    echo -e "${YELLOW}Instalando OpenSSL...${NC}"
+    apt-get update && apt-get install -y openssl
+fi
+
+# Verificar systemd
+if ! command -v systemctl &> /dev/null; then
+    echo -e "${RED}❌ systemd não encontrado!${NC}"
+    echo -e "${YELLOW}Este script requer um sistema com systemd.${NC}"
+    exit 1
+fi
+
+# Verificar SSH
+if ! command -v ssh &> /dev/null; then
+    echo -e "${YELLOW}Instalando OpenSSH Server...${NC}"
+    apt-get update && apt-get install -y openssh-server
+    systemctl enable ssh
+    systemctl start ssh
+fi
+
+# Compilar
+echo -e "${GREEN}Compilando SDProxy...${NC}"
+cd "$(dirname "$0")"
+
+# Verificar se há Cargo.toml
+if [ ! -f "Cargo.toml" ]; then
+    echo -e "${RED}❌ Cargo.toml não encontrado!${NC}"
+    exit 1
+fi
+
+# Build
+cargo build --release 2>&1
+
+# Copiar binário
+if [ -f "target/release/sdproxy" ]; then
+    cp target/release/sdproxy "${PROXY_BIN}"
+    chmod +x "${PROXY_BIN}"
+    echo -e "${GREEN}✅ Binário instalado em ${PROXY_BIN}${NC}"
 else
-    log_info "Rust já está instalado. Pulando instalação."
-    source "$HOME/.cargo/env" # Ensure env is sourced even if already installed
+    echo -e "${RED}❌ Falha ao compilar!${NC}"
+    exit 1
 fi
 
-# --- Etapa 3: Clonar Repositório ---
-show_progress "Baixando o código fonte do SDProxy..."
-rm -rf /root/SDProxy # Limpa instalações anteriores
-git clone --branch "$REPO_BRANCH" "$REPO_URL" /root/SDProxy > /dev/null 2>&1 || log_error "Falha ao clonar o repositório. Verifique a URL ou sua conexão."
-cd /root/SDProxy || log_error "Falha ao entrar no diretório do projeto."
-
-# --- Etapa 4: Compilar o Projeto ---
-show_progress "Compilando o SDProxy (isso pode levar 2-5 minutos, sem saída detalhada)..."
-# Redireciona a saída de compilação para um arquivo temporário e stdout para /dev/null
-# Apenas erros críticos serão exibidos
-cargo build --release > /tmp/sdproxy_build.log 2>&1
-if [ $? -ne 0 ]; then
-    log_error "Falha na compilação do SDProxy. Verifique o log em /tmp/sdproxy_build.log para detalhes."
+# Gerar certificados
+echo -e "${GREEN}Gerando certificados TLS...${NC}"
+if [ ! -f "${CERT_DIR}/cert.pem" ]; then
+    openssl req -x509 -newkey rsa:2048 -keyout "${CERT_DIR}/key.pem" \
+        -out "${CERT_DIR}/cert.pem" -days 365 -nodes \
+        -subj "/CN=sdproxy/O=SDProxy/C=BR" 2>/dev/null
+    echo -e "${GREEN}✅ Certificados gerados em ${CERT_DIR}${NC}"
+else
+    echo -e "${GREEN}✅ Certificados já existem${NC}"
 fi
 
-# --- Etapa 5: Instalar Binários ---
-show_progress "Instalando binários e configurando o sistema..."
-mkdir -p /opt/sdproxy || log_error "Falha ao criar diretório /opt/sdproxy."
-cp ./target/release/sdproxy /opt/sdproxy/proxy || log_error "Falha ao copiar binário do proxy."
-chmod +x /opt/sdproxy/proxy || log_error "Falha ao dar permissão de execução ao proxy."
-
-# Copia e configura o menu.sh se existir
+# Instalar menu.sh
+echo -e "${GREEN}Instalando menu...${NC}"
 if [ -f "menu.sh" ]; then
-    cp menu.sh /opt/sdproxy/menu || log_error "Falha ao copiar script de menu."
-    chmod +x /opt/sdproxy/menu || log_error "Falha ao dar permissão de execução ao menu."
-    ln -sf /opt/sdproxy/menu /usr/local/bin/sdproxy || log_error "Falha ao criar link simbólico para o menu."
+    cp menu.sh "${SDPROXY}/menu.sh"
+    chmod +x "${SDPROXY}/menu.sh"
+    
+    # Criar symlink no /usr/local/bin
+    ln -sf "${SDPROXY}/menu.sh" /usr/local/bin/sdproxy
+    echo -e "${GREEN}✅ Menu instalado. Use 'sdproxy' para executar.${NC}"
 else
-    ln -sf /opt/sdproxy/proxy /usr/local/bin/sdproxy || log_error "Falha ao criar link simbólico para o proxy."
+    echo -e "${YELLOW}⚠️ menu.sh não encontrado, pulando instalação do menu.${NC}"
 fi
 
-# --- Etapa 6: Limpar Arquivos Temporários ---
-show_progress "Limpando arquivos temporários..."
-rm -rf /root/SDProxy
-rm -f /tmp/sdproxy_build.log
-
-# --- Etapa 7: Finalização ---
-log_success "Instalação do SDProxy concluída com sucesso!"
-log_info "Para iniciar o proxy, digite: sdproxy"
-log_info "Para desinstalar, digite: /opt/sdproxy/uninstall.sh (se existir)"
+echo ""
+echo -e "${GREEN}╔══════════════════════════════════╗${NC}"
+echo -e "${GREEN}║     ✅ SDProxy Instalado!        ║${NC}"
+echo -e "${GREEN}╠══════════════════════════════════╣${NC}"
+echo -e "${GREEN}║  Binário: ${PROXY_BIN}          ║${NC}"
+echo -e "${GREEN}║  Certs:   ${CERT_DIR}/           ║${NC}"
+echo -e "${GREEN}║  Menu:    sdproxy (qualquer dir)  ║${NC}"
+echo -e "${GREEN}╚══════════════════════════════════╝${NC}"
+echo ""
+echo -e "${CYAN}Para iniciar:${NC}"
+echo -e "  sdproxy           → Menu interativo"
+echo -e "  ${YELLOW}[04] xHTTP SplitHTTP → Porta 443 exclusiva${NC}"
+echo -e ""
+echo -e "${CYAN}Flags do binário:${NC}"
+echo -e "  -p PORTA       → Porta TCP"
+echo -e "  -s STATUS      → Status HTTP (ex: @SDProxy)"
+echo -e "  -t             → Habilitar TLS"
+echo -e "  -ssh           → SSH only"
+echo -e "  -u             → UDP"
+echo -e "  -q             → QUIC"
+echo -e "  -x             → xHTTP mode (porta 443, TLS, SSH only)"
+echo ""

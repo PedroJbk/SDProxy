@@ -1,82 +1,81 @@
+//! SOCKS5 Handler
+//! Aceita conexões SOCKS5 e faz proxy para SSH
+
+use std::io::Error;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use anyhow::Result;
-use log::info;
+use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 
-pub async fn handle_socks5(mut client: TcpStream) -> Result<()> {
-    info!("🔐 SOCKS5");
+pub async fn handle_socks5(mut stream: TcpStream) -> Result<(), Error> {
+    println!("[SOCKS5] Nova conexão...");
 
-    let mut header = [0u8; 2];
-    client.read_exact(&mut header).await?;
-    let nmethods = header[1] as usize;
-
-    let mut methods = vec![0u8; nmethods];
-    client.read_exact(&mut methods).await?;
-
-    client.write_all(&[0x05, 0x00]).await?;
-
-    let mut req = [0u8; 4];
-    client.read_exact(&mut req).await?;
-    let cmd = req[1];
-    let atyp = req[3];
-
-    let target_addr = match atyp {
-        0x01 => {
-            let mut addr = [0u8; 4];
-            client.read_exact(&mut addr).await?;
-            let port = read_port(&mut client).await?;
-            format!("{}.{}.{}.{}:{}", addr[0], addr[1], addr[2], addr[3], port)
-        }
-        0x03 => {
-            let mut len_buf = [0u8; 1];
-            client.read_exact(&mut len_buf).await?;
-            let len = len_buf[0] as usize;
-
-            let mut domain = vec![0u8; len];
-            client.read_exact(&mut domain).await?;
-            let port = read_port(&mut client).await?;
-            format!("{}:{}", String::from_utf8_lossy(&domain), port)
-        }
-        _ => {
-            send_reply(&mut client, 0x08).await?;
-            anyhow::bail!("Unsupported address type");
-        }
+    // Ler handshake SOCKS5
+    let mut buf = [0u8; 256];
+    let n = match timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
+        Ok(Ok(n)) => n,
+        _ => return Ok(()),
     };
 
-    if cmd != 0x01 {
-        send_reply(&mut client, 0x07).await?;
-        anyhow::bail!("Unsupported SOCKS command");
+    if n < 2 || buf[0] != 0x05 {
+        println!("[SOCKS5] Handshake inválido");
+        return Ok(());
     }
 
-    info!("SOCKS5 -> {}", target_addr);
+    // Responder: version 5, no auth
+    stream.write_all(&[0x05, 0x00]).await?;
 
-    match TcpStream::connect(&target_addr).await {
-        Ok(remote) => {
-            send_reply(&mut client, 0x00).await?;
-            let (mut client_reader, mut client_writer) = client.into_split();
-            let (mut remote_reader, mut remote_writer) = remote.into_split();
+    // Ler CONNECT request
+    let n2 = match timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
+        Ok(Ok(n)) => n,
+        _ => return Ok(()),
+    };
 
-            tokio::try_join!(
-                tokio::io::copy(&mut client_reader, &mut remote_writer),
-                tokio::io::copy(&mut remote_reader, &mut client_writer)
-            )?;
-            Ok(())
-        }
-        Err(e) => {
-            send_reply(&mut client, 0x05).await?;
-            anyhow::bail!("Connection failed: {}", e);
-        }
+    if n2 < 7 {
+        println!("[SOCKS5] CONNECT request inválido");
+        return Ok(());
     }
+
+    // Responder: sucesso, bind address 0.0.0.0:0
+    let mut response = vec![0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    stream.write_all(&response).await?;
+    stream.flush().await?;
+
+    // Tunnel para SSH
+    let addr = "127.0.0.1:22";
+    match TcpStream::connect(addr).await {
+        Ok(backend) => {
+            let (cr, cw) = stream.into_split();
+            let (sr, sw) = backend.into_split();
+            let cr = Arc::new(Mutex::new(cr));
+            let cw = Arc::new(Mutex::new(cw));
+            let sr = Arc::new(Mutex::new(sr));
+            let sw = Arc::new(Mutex::new(sw));
+            let _ = tokio::try_join!(
+                transfer(cr, sw),
+                transfer(sr, cw),
+            );
+        }
+        Err(e) => println!("[SOCKS5] Erro backend: {}", e),
+    }
+
+    Ok(())
 }
 
-async fn read_port(client: &mut TcpStream) -> std::io::Result<u16> {
-    let mut port_buf = [0u8; 2];
-    client.read_exact(&mut port_buf).await?;
-    Ok(u16::from_be_bytes(port_buf))
-}
-
-async fn send_reply(client: &mut TcpStream, code: u8) -> std::io::Result<()> {
-    client
-        .write_all(&[0x05, code, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-        .await
+async fn transfer(
+    read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
+    write_stream: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+) -> Result<(), Error> {
+    let mut buffer = [0; 8192];
+    loop {
+        let bytes_read = {
+            let mut read_guard = read_stream.lock().await;
+            read_guard.read(&mut buffer).await?
+        };
+        if bytes_read == 0 { break; }
+        let mut write_guard = write_stream.lock().await;
+        write_guard.write_all(&buffer[..bytes_read]).await?;
+    }
+    Ok(())
 }

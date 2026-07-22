@@ -1,104 +1,76 @@
+//! QUIC Handler
+//! Servidor QUIC para VPN over QUIC (usando quinn + rustls)
+
+use std::io::Error;
 use std::sync::Arc;
-use std::path::Path;
-use anyhow::Result;
-use log::info;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio::net::TcpStream;
 
-/// Configura o servidor QUIC com certificado auto-assinado ou arquivos existentes.
-pub fn configure_server(cert_path: &str, key_path: &str) -> Result<quinn::ServerConfig> {
-    info!("🔐 Configurando servidor QUIC...");
-
-    let certs = load_certs(cert_path)?;
-    let key = load_key(key_path)?;
-
-    let mut server_config = quinn::ServerConfig::with_single_cert(certs, key)?;
-
-    // Configurar transporte QUIC
-    let transport_config = Arc::new(quinn::TransportConfig::default());
-    server_config.transport = transport_config;
-
-    info!("✅ Servidor QUIC configurado");
-    Ok(server_config)
-}
-
-/// Gera certificado auto-assinado e salva nos caminhos especificados.
-pub fn generate_self_signed_cert(cert_path: &str, key_path: &str) -> Result<()> {
-    info!("📜 Gerando certificado auto-assinado...");
-
-    let cert = rcgen::generate_simple_self_signed(vec![
-        "localhost".to_string(),
-    ])?;
-
-    // Salvar certificado em formato PEM
-    std::fs::write(cert_path, cert.cert.pem())?;
-    // Salvar chave privada em formato PEM
-    std::fs::write(key_path, cert.key_pair.serialize_pem())?;
-
-    info!("✅ Certificado salvo em: {}", cert_path);
-    info!("✅ Chave salva em: {}", key_path);
-    Ok(())
-}
-
-/// Carrega certificados de arquivo PEM
-fn load_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
-    let cert_pem = std::fs::read_to_string(path)?;
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(certs)
-}
-
-/// Carrega chave privada de arquivo PEM
-fn load_key(path: &str) -> Result<PrivateKeyDer<'static>> {
-    let key_pem = std::fs::read_to_string(path)?;
-    let mut keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_bytes())
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    if let Some(key) = keys.pop() {
-        Ok(PrivateKeyDer::Pkcs8(key))
-    } else {
-        // Tentar RSA
-        let key_pem2 = std::fs::read_to_string(path)?;
-        let mut rsa_keys: Vec<_> = rustls_pemfile::rsa_private_keys(&mut key_pem2.as_bytes())
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        if let Some(key) = rsa_keys.pop() {
-            Ok(PrivateKeyDer::Pkcs1(key))
-        } else {
-            Err(anyhow::anyhow!("Nenhuma chave privada válida encontrada em {}", path))
-        }
-    }
-}
-
-/// Handler principal do servidor QUIC.
 pub async fn start_quic_server(
     port: u16,
     cert_path: &str,
     key_path: &str,
     ssh_only: bool,
-) -> Result<()> {
-    info!("🚀 Iniciando servidor QUIC na porta {}", port);
+) -> Result<(), Error> {
+    println!("[QUIC] Servidor QUIC rodando na porta: {}", port);
 
-    // Garantir que o certificado existe
-    if !Path::new(cert_path).exists() || !Path::new(key_path).exists() {
-        generate_self_signed_cert(cert_path, key_path)?;
-    }
+    use quinn::Endpoint;
+    use std::net::SocketAddr;
 
-    let server_config = configure_server(cert_path, key_path)?;
+    let addr: SocketAddr = format!("[::]:{}", port).parse()?;
 
-    let endpoint = quinn::Endpoint::server(server_config, format!("[::]:{}", port).parse()?)?;
-    info!("✅ QUIC endpoint ativo na porta {}", port);
+    // Carregar certificados
+    let mut cert_file = std::fs::File::open(cert_path)?;
+    let mut key_file = std::fs::File::open(key_path)?;
+
+    let mut cert_buf = Vec::new();
+    std::io::Read::read_to_end(&mut cert_file, &mut cert_buf)?;
+    let mut key_buf = Vec::new();
+    std::io::Read::read_to_end(&mut key_file, &mut key_buf)?;
+
+    // Parse certificados
+    let cert_reader = std::io::Cursor::new(&cert_buf);
+    let certs: Vec<rustls::pki_types::CertificateDer<'_>> =
+        rustls_pemfile::certs(cert_reader).filter_map(|c| c.ok()).collect();
+
+    let key_der = rustls_pemfile::private_key(&mut std::io::Cursor::new(&key_buf))
+        .ok()
+        .and_then(|r| r.ok())
+        .ok_or_else(|| Error::new(std::io::ErrorKind::Other, "Key parse error"))?;
+
+    // Configurar quinn server
+    let server_config = quinn::ServerConfig::with_single_cert(certs, key_der)
+        .map_err(|e| Error::new(std::io::ErrorKind::Other, format!("QUIC cert error: {}", e)))?;
+
+    // Configurar transport
+    let mut transport_config = quinn::TransportConfig::default();
+    transport_config.max_concurrent_bidi_streams(256_u32.into());
+    transport_config.max_concurrent_uni_streams(256_u32.into());
+    server_config.transport_config(Arc::new(transport_config));
+
+    let endpoint = Endpoint::server(server_config, addr)
+        .map_err(|e| Error::new(std::io::ErrorKind::Other, format!("QUIC bind error: {}", e)))?;
+
+    println!("[QUIC] Endpoint criado, aguardando conexões...");
 
     loop {
         match endpoint.accept().await {
-            Some(incoming) => {
+            Some(conn) => {
                 let ssh_only = ssh_only;
                 tokio::spawn(async move {
-                    if let Err(e) = handle_quic_tunnel(incoming, ssh_only).await {
-                        info!("Erro na conexão QUIC: {}", e);
+                    match conn.await {
+                        Ok(connection) => {
+                            println!("[QUIC] Nova conexão estabelecida");
+                            if let Err(e) = handle_quic_connection(connection, ssh_only).await {
+                                println!("[QUIC] Erro na conexão: {}", e);
+                            }
+                        }
+                        Err(e) => println!("[QUIC] Erro ao aceitar: {}", e),
                     }
                 });
             }
             None => {
-                info!("QUIC endpoint fechado");
+                println!("[QUIC] Endpoint fechado");
                 break;
             }
         }
@@ -107,73 +79,84 @@ pub async fn start_quic_server(
     Ok(())
 }
 
-/// Proxy QUIC com tunnel bidirecional completo (stream mode)
-pub async fn handle_quic_tunnel(incoming: quinn::Incoming, ssh_only: bool) -> Result<()> {
-    let connection = incoming.await?;
-    info!("🔗 QUIC tunnel de: {}", connection.remote_address());
-
-    let addr_proxy = if ssh_only {
-        "127.0.0.1:22"
-    } else {
-        "127.0.0.1:22" // Default para SSH
-    };
-
-    // Tentar conectar ao backend
-    let backend = match tokio::net::TcpStream::connect(addr_proxy).await {
-        Ok(s) => s,
-        Err(e) => {
-            // Fallback para VPN
-            if !ssh_only {
-                info!("QUIC SSH falhou, tentando VPN...");
-                tokio::net::TcpStream::connect("127.0.0.1:1194").await?
-            } else {
-                return Err(e.into());
-            }
-        }
-    };
-
-    // Aceitar stream bidirecional QUIC
-    let (mut send, mut recv) = connection.accept_bi().await?;
-
-    let (backend_read, backend_write) = backend.into_split();
-    let backend_read = Arc::new(tokio::sync::Mutex::new(backend_read));
-
-    // QUIC -> Backend
-    let backend_write_arc = Arc::new(tokio::sync::Mutex::new(backend_write));
-    let backend_write_clone = backend_write_arc.clone();
-    let quic_to_backend = tokio::spawn(async move {
-        let mut buf = [0u8; 8192];
-        loop {
-            match recv.read(&mut buf).await {
-                Ok(Some(n)) => {
-                    let mut bw = backend_write_clone.lock().await;
-                    if bw.write_all(&buf[..n]).await.is_err() {
-                        break;
+async fn handle_quic_connection(
+    connection: quinn::Connection,
+    ssh_only: bool,
+) -> Result<(), Error> {
+    loop {
+        match connection.accept_bi().await {
+            Ok((mut send, mut recv)) => {
+                tokio::spawn(async move {
+                    let addr = if ssh_only { "127.0.0.1:22" } else { "127.0.0.1:22" };
+                    match TcpStream::connect(addr).await {
+                        Ok(backend) => {
+                            let (cr, cw) = backend.into_split();
+                            let cr = Arc::new(tokio::sync::Mutex::new(cr));
+                            let cw = Arc::new(tokio::sync::Mutex::new(cw));
+                            let send = Arc::new(tokio::sync::Mutex::new(send));
+                            let recv = Arc::new(tokio::sync::Mutex::new(recv));
+                            let _ = tokio::try_join!(
+                                quic_to_tcp(recv, cw),
+                                tcp_to_quic(cr, send),
+                            );
+                        }
+                        Err(e) => println!("[QUIC] Erro backend: {}", e),
                     }
-                }
-                _ => break,
+                });
+            }
+            Err(quinn::ConnectionError::LocallyClosed) => {
+                println!("[QUIC] Conexão fechada localmente");
+                break;
+            }
+            Err(e) => {
+                println!("[QUIC] Erro ao aceitar stream: {}", e);
+                break;
             }
         }
-    });
+    }
 
-    // Backend -> QUIC
-    let backend_to_quic = tokio::spawn(async move {
-        let mut buf = [0u8; 8192];
-        let mut reader = backend_read.lock().await;
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(n) if n > 0 => {
-                    if send.write_all(&buf[..n]).await.is_err() {
-                        break;
-                    }
-                }
-                _ => break,
+    Ok(())
+}
+
+async fn quic_to_tcp(
+    quic_recv: Arc<tokio::sync::Mutex<quinn::RecvStream>>,
+    tcp_write: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+) -> Result<(), Error> {
+    let mut buffer = [0u8; 8192];
+    loop {
+        let bytes_read = {
+            let mut recv = quic_recv.lock().await;
+            match recv.read(&mut buffer).await {
+                Ok(Some(n)) => n,
+                Ok(None) => break,
+                Err(e) => return Err(Error::new(std::io::ErrorKind::Other, e)),
             }
-        }
-        let _ = send.finish();
-    });
+        };
+        let mut write = tcp_write.lock().await;
+        write.write_all(&buffer[..bytes_read]).await?;
+    }
+    Ok(())
+}
 
-    tokio::try_join!(quic_to_backend, backend_to_quic)?;
-    info!("QUIC tunnel finalizado");
+async fn tcp_to_quic(
+    tcp_read: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedReadHalf>>,
+    quic_send: Arc<tokio::sync::Mutex<quinn::SendStream>>,
+) -> Result<(), Error> {
+    let mut buffer = [0u8; 8192];
+    loop {
+        let bytes_read = {
+            let mut read = tcp_read.lock().await;
+            match read.read(&mut buffer).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => return Err(e),
+            }
+        };
+        let mut send = quic_send.lock().await;
+        match send.write_all(&buffer[..bytes_read]).await {
+            Ok(_) => {},
+            Err(e) => return Err(Error::new(std::io::ErrorKind::Other, e)),
+        }
+    }
     Ok(())
 }

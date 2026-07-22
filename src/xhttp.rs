@@ -1,457 +1,396 @@
+//! xHTTP (SplitHTTP) Handler
+//! Protocolo real usado pelo SocksRevive-XHTTP-DEMO
+//!
+//! Fluxo:
+//! 1. Client → TLS handshake (0x16 0x03)
+//! 2. Client → HTTP/2 GET /{basePath}/{sessionId} → streaming downlink
+//! 3. Client → HTTP/2 POST /{basePath}/{sessionId}/{seq} → uplink sequenciado
+//! 4. Dados SSH viajam dentro dos streams HTTP/2
+//!
+//! O servidor precisa:
+//! - Terminar TLS (decodificar)
+//! - Parsear HTTP/2 GET/POST
+//! - Manter sessões ativas
+//! - Bridge: GET response body ↔ SSH backend
+//! - Bridge: POST body → SSH backend
+
 use std::collections::HashMap;
-use std::io::Error;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use lazy_static::lazy_static;
-use log::info;
+use tokio::time::{timeout, Duration};
 
-lazy_static! {
-    static ref SESSIONS: Arc<Mutex<HashMap<String, Arc<Mutex<XHttpSession>>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Sessão xHTTP: mantém o backend TCP + buffers de reassembly
-// ─────────────────────────────────────────────────────────────────────────────
-
-struct XHttpSession {
-    backend: Option<TcpStream>,
-    downlink_buffer: Vec<u8>,
+/// Sessão xHTTP ativa
+struct XhttpSession {
+    ssh_stream: TcpStream,
+    uplink_sequence: u64,
+    /// Buffer para dados SSH recebidos via POST
+    ssh_buffer: Vec<u8>,
+    /// Flag: conexão SSH ativa
     active: bool,
-    created: std::time::Instant,
 }
 
-impl XHttpSession {
-    fn new() -> Self {
-        XHttpSession {
-            backend: None,
-            downlink_buffer: Vec::new(),
-            active: true,
-            created: std::time::Instant::now(),
-        }
-    }
-
-    async fn connect_backend(&mut self, ssh_only: bool) -> Result<(), Error> {
-        if self.backend.is_some() {
-            return Ok(());
-        }
-        let primary = if ssh_only {
-            "127.0.0.1:22"
-        } else {
-            "127.0.0.1:22"
-        };
-        match TcpStream::connect(primary).await {
-            Ok(s) => {
-                info!("xHTTP session: backend SSH conectado");
-                self.backend = Some(s);
-                Ok(())
-            }
-            Err(e) => {
-                if !ssh_only {
-                    info!("xHTTP SSH falhou ({}), tentando VPN...", e);
-                    match TcpStream::connect("127.0.0.1:1194").await {
-                        Ok(s) => {
-                            info!("xHTTP session: backend VPN conectado");
-                            self.backend = Some(s);
-                            Ok(())
-                        }
-                        Err(e2) => Err(Error::new(
-                            std::io::ErrorKind::ConnectionRefused,
-                            format!("SSH: {}, VPN: {}", e, e2),
-                        )),
-                    }
-                } else {
-                    Err(e)
-                }
-            }
-        }
-    }
-
-    async fn read_backend(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
-        if !self.downlink_buffer.is_empty() {
-            let len = buf.len().min(self.downlink_buffer.len());
-            buf[..len].copy_from_slice(&self.downlink_buffer[..len]);
-            self.downlink_buffer.drain(..len);
-            return Ok(len);
-        }
-        match self.backend {
-            Some(ref mut b) => {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(500),
-                    b.read(buf),
-                ).await {
-                    Ok(Ok(0)) => Err(Error::new(
-                        std::io::ErrorKind::ConnectionReset, "Backend fechou")),
-                    Ok(Ok(n)) => Ok(n),
-                    Ok(Err(e)) => Err(e),
-                    Err(_) => Ok(0),
-                }
-            }
-            None => Err(Error::new(
-                std::io::ErrorKind::NotConnected, "Sem backend")),
-        }
-    }
-
-    async fn write_backend(&mut self, data: &[u8]) -> Result<(), Error> {
-        match self.backend {
-            Some(ref mut b) => {
-                b.write_all(data).await?;
-                Ok(())
-            }
-            None => Err(Error::new(
-                std::io::ErrorKind::NotConnected, "Sem backend")),
-        }
-    }
+/// Sessões ativas keyed por session_id
+lazy_static::lazy_static! {
+    static ref SESSIONS: Arc<Mutex<HashMap<String, XhttpSession>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HTTP Request parser simples
-// ─────────────────────────────────────────────────────────────────────────────
-
-struct HttpRequest {
-    method: String,
-    path: String,
-    headers: HashMap<String, String>,
-    content_length: usize,
-}
-
-impl HttpRequest {
-    fn parse(data: &[u8]) -> Option<HttpRequest> {
-        let text = String::from_utf8_lossy(data);
-        let header_end = find_crlf_crlf(data)?;
-        let header_section = text[..header_end].to_string();
-        let lines: Vec<&str> = header_section.split("\r\n").collect();
-        if lines.is_empty() { return None; }
-
-        let parts: Vec<&str> = lines[0].splitn(3, ' ').collect();
-        if parts.len() < 2 { return None; }
-
-        let mut headers = HashMap::new();
-        let mut content_length: usize = 0;
-        for line in &lines[1..] {
-            if let Some(pos) = line.find(':') {
-                let key = line[..pos].trim().to_lowercase();
-                let val = line[pos + 1..].trim().to_string();
-                if key == "content-length" {
-                    content_length = val.parse().unwrap_or(0);
-                }
-                headers.insert(key, val);
-            }
-        }
-
-        Some(HttpRequest {
-            method: parts[0].to_string(),
-            path: parts[1].to_string(),
-            headers,
-            content_length,
-        })
-    }
-}
-
-fn find_crlf_crlf(data: &[u8]) -> Option<usize> {
-    for i in 0..data.len().saturating_sub(3) {
-        if data[i] == b'\r' && data[i + 1] == b'\n'
-            && data[i + 2] == b'\r' && data[i + 3] == b'\n' {
-            return Some(i);
-        }
-    }
-    None
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Handler principal xHTTP (SplitHTTP)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Compatível com SocksRevive-XHTTP-DEMO:
-///   GET  /path/session-id       → streaming downlink (server→client)
-///   POST /path/session-id/seq   → uplink sequenciado (client→server)
+/// Handler principal xHTTP
+/// Aceita requisições HTTP GET e POST para streaming SSH over HTTP/2
 pub async fn handle_xhttp(
-    client_stream: TcpStream,
+    mut stream: TcpStream,
     status: &str,
     ssh_only: bool,
-) -> Result<(), Error> {
-    let mut client = client_stream;
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("[xHTTP] Nova conexão recebida");
 
-    // Ler request
-    let mut buf = vec![0u8; 65536];
-    let n = client.read(&mut buf).await?;
-    if n == 0 {
-        return Err(Error::new(
-            std::io::ErrorKind::ConnectionReset, "Sem dados"));
-    }
+    // Ler a requisição HTTP do cliente
+    let mut request_buf = vec![0u8; 65536];
+    let read_result = timeout(Duration::from_secs(10), stream.read(&mut request_buf)).await;
 
-    let request = HttpRequest::parse(&buf[..n]).ok_or_else(|| {
-        Error::new(std::io::ErrorKind::InvalidData, "HTTP inválido")
-    })?;
-
-    info!("xHTTP {} {} (content-length: {})", request.method, request.path, request.content_length);
-
-    match request.method.as_str() {
-        "GET" => {
-            // Se tem body (xHTTP com dados inline), tratar como POST
-            if request.content_length > 0 && n > find_crlf_crlf(&buf[..n]).unwrap_or(0) + 4 {
-                let body_start = find_crlf_crlf(&buf[..n]).unwrap_or(0) + 4;
-                let body = &buf[body_start..n];
-                handle_xhttp_post(&mut client, &request.path, body, ssh_only).await
-            } else {
-                handle_xhttp_get(&mut client, &request.path, status, ssh_only).await
-            }
-        }
-        "POST" => {
-            // Extrair body após headers
-            let body_start = find_crlf_crlf(&buf[..n]).unwrap_or(0) + 4;
-            let body = if body_start < n {
-                &buf[body_start..n]
-            } else {
-                &[]
-            };
-            // Se body recebido é menor que Content-Length, ler o resto
-            let mut full_body = body.to_vec();
-            while full_body.len() < request.content_length {
-                let remaining = request.content_length - full_body.len();
-                let mut tmp = vec![0u8; remaining];
-                let r = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    client.read(&mut tmp),
-                ).await;
-                match r {
-                    Ok(Ok(rn)) if rn > 0 => {
-                        full_body.extend_from_slice(&tmp[..rn]);
-                    }
-                    _ => break,
-                }
-            }
-            handle_xhttp_post(&mut client, &request.path, &full_body, ssh_only).await
+    let request_data = match read_result {
+        Ok(Ok(n)) if n > 0 => {
+            String::from_utf8_lossy(&request_buf[..n]).to_string()
         }
         _ => {
-            let resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n";
-            client.write_all(resp.as_bytes()).await?;
+            println!("[xHTTP] Timeout ou erro na leitura da requisição");
+            return Ok(());
+        }
+    };
+
+    println!("[xHTTP] Request: {} bytes", request_data.len());
+    println!("[xHTTP] Preview: {}", &request_data[..std::cmp::min(request_data.len(), 500)]);
+
+    // Parsear a requisição HTTP
+    if let Some((method, path)) = parse_http_request(&request_data) {
+        println!("[xHTTP] Method: {} Path: {}", method, path);
+
+        match method.as_str() {
+            "GET" => {
+                handle_xhttp_get(&mut stream, &path, status, ssh_only).await?;
+            }
+            "POST" => {
+                handle_xhttp_post(&mut stream, &request_data, &path, ssh_only).await?;
+            }
+            _ => {
+                println!("[xHTTP] Método não suportado: {}", method);
+                send_404(&mut stream, status).await?;
+            }
+        }
+    } else {
+        println!("[xHTTP] Falha ao parsear requisição HTTP");
+        send_404(&mut stream, status).await?;
+    }
+
+    Ok(())
+}
+
+/// Parsear requisição HTTP básica
+fn parse_http_request(data: &str) -> Option<(String, String)> {
+    let first_line = data.lines().next()?;
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+
+    if parts.len() >= 2 {
+        Some((parts[0].to_string(), parts[1].to_string()))
+    } else {
+        None
+    }
+}
+
+/// Handler GET - Streaming downlink
+/// Cliente envia GET /{basePath}/{sessionId}
+/// Servidor responde com HTTP/2 streaming + chunked encoding
+async fn handle_xhttp_get(
+    stream: &mut TcpStream,
+    path: &str,
+    status: &str,
+    ssh_only: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Extrair session_id do path
+    // Formato: /ssh/{sessionId} ou /{sessionId}
+    let session_id = extract_session_id(path);
+
+    if session_id.is_empty() {
+        println!("[xHTTP] GET sem session_id válido");
+        send_404(stream, status).await?;
+        return Ok(());
+    }
+
+    println!("[xHTTP] GET session_id: {}", session_id);
+
+    // Conectar ao backend SSH
+    let addr = if ssh_only { "127.0.0.1:22" } else { "127.0.0.1:22" };
+
+    match TcpStream::connect(addr).await {
+        Ok(ssh_stream) => {
+            println!("[xHTTP] SSH backend conectado para session {}", session_id);
+
+            // Criar sessão
+            {
+                let mut sessions = SESSIONS.lock().await;
+                sessions.insert(session_id.clone(), XhttpSession {
+                    ssh_stream,
+                    uplink_sequence: 0,
+                    ssh_buffer: Vec::new(),
+                    active: true,
+                });
+            }
+
+            // Enviar HTTP response com streaming
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: application/octet-stream\r\n\
+                 Transfer-Encoding: chunked\r\n\
+                 Cache-Control: no-cache\r\n\
+                 Connection: keep-alive\r\n\
+                 X-Session: {}\r\n\
+                 X-Status: {}\r\n\r\n",
+                session_id, status
+            );
+
+            stream.write_all(response.as_bytes()).await?;
+            stream.flush().await?;
+
+            println!("[xHTTP] GET response enviada, iniciando streaming para session {}", session_id);
+
+            // Manter conexão aberta e fazer tunnel SSH
+            // O SSH backend vai enviar dados que precisamos repassar ao cliente
+            let mut sessions = SESSIONS.lock().await;
+            if let Some(session) = sessions.get_mut(&session_id) {
+                // Ler dados do SSH backend e enviar como chunks HTTP
+                let mut buffer = [0u8; 4096];
+                loop {
+                    match timeout(Duration::from_secs(60), session.ssh_stream.read(&mut buffer)).await {
+                        Ok(Ok(0)) => {
+                            println!("[xHTTP] SSH stream fechado (EOF)");
+                            break;
+                        }
+                        Ok(Ok(n)) => {
+                            // Enviar como chunk HTTP
+                            let chunk_header = format!("{:x}\r\n", n);
+                            if let Err(e) = stream.write_all(chunk_header.as_bytes()).await {
+                                println!("[xHTTP] Erro ao escrever chunk header: {}", e);
+                                break;
+                            }
+                            if let Err(e) = stream.write_all(&buffer[..n]).await {
+                                println!("[xHTTP] Erro ao escrever chunk data: {}", e);
+                                break;
+                            }
+                            if let Err(e) = stream.write_all(b"\r\n").await {
+                                println!("[xHTTP] Erro ao escrever chunk footer: {}", e);
+                                break;
+                            }
+                            if let Err(e) = stream.flush().await {
+                                println!("[xHTTP] Erro ao flush: {}", e);
+                                break;
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            println!("[xHTTP] Erro ao ler SSH: {}", e);
+                            break;
+                        }
+                        Err(_) => {
+                            // Timeout - enviar chunk vazio para manter alive
+                            if let Err(e) = stream.write_all(b"0\r\n\r\n").await {
+                                break;
+                            }
+                            if let Err(e) = stream.flush().await {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Remover sessão
+            {
+                let mut sessions = SESSIONS.lock().await;
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.active = false;
+                }
+                sessions.remove(&session_id);
+            }
+
+            // Enviar chunk final
+            let _ = stream.write_all(b"0\r\n\r\n").await;
+            let _ = stream.flush().await;
+
+            println!("[xHTTP] Streaming encerrado para session {}", session_id);
+            Ok(())
+        }
+        Err(e) => {
+            println!("[xHTTP] Falha ao conectar SSH backend: {}", e);
+            send_502(stream, status).await?;
             Ok(())
         }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GET handler: streaming downlink
-// ─────────────────────────────────────────────────────────────────────────────
-
-async fn handle_xhttp_get(
-    client: &mut TcpStream,
-    path: &str,
-    status: &str,
-    ssh_only: bool,
-) -> Result<(), Error> {
-    // /path/session-id  ou  /session-id
-    let session_id = extract_session_id(path);
-    info!("xHTTP GET session={}", session_id);
-
-    let session = get_or_create_session(&session_id, ssh_only).await?;
-
-    // Responder 200 OK com streaming
-    let response = format!(
-        "HTTP/1.1 200 {}\r\n\
-         Server: SDProxy\r\n\
-         Content-Type: application/octet-stream\r\n\
-         Transfer-Encoding: chunked\r\n\
-         Connection: keep-alive\r\n\
-         X-Session: {}\r\n\
-         X-Protocol: xHTTP\r\n\
-         \r\n",
-        status, session_id
-    );
-    client.write_all(response.as_bytes()).await?;
-    client.flush().await?;
-
-    // Loop de streaming: lê do backend e envia como chunks
-    let mut chunk_buf = vec![0u8; 8192];
-    let mut empty_chunks = 0;
-    let max_empty = 120; // ~60s de idle antes de fechar
-
-    loop {
-        let mut sess = session.lock().await;
-        if !sess.active {
-            break;
-        }
-
-        match sess.read_backend(&mut chunk_buf).await {
-            Ok(n) if n > 0 => {
-                empty_chunks = 0;
-                // Enviar chunk HTTP: tamanho_hex\r\ndados\r\n
-                let hex = format!("{:x}\r\n", n);
-                client.write_all(hex.as_bytes()).await?;
-                client.write_all(&chunk_buf[..n]).await?;
-                client.write_all(b"\r\n").await?;
-            }
-            Ok(_) => {
-                // Timeout sem dados - enviar keep-alive
-                empty_chunks += 1;
-                if empty_chunks > max_empty {
-                    // Enviar chunk vazio final (encerrar stream)
-                    client.write_all(b"0\r\n\r\n").await?;
-                    client.flush().await?;
-                    break;
-                }
-            }
-            Err(_) => {
-                // Backend fechado
-                client.write_all(b"0\r\n\r\n").await?;
-                client.flush().await?;
-                break;
-            }
-        }
-        client.flush().await?;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-
-    info!("xHTTP GET stream encerrado (session={})", session_id);
-    Ok(())
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST handler: uplink sequenciado
-// ─────────────────────────────────────────────────────────────────────────────
-
+/// Handler POST - Uplink sequenciado
+/// Cliente envia POST /{basePath}/{sessionId}/{sequence}
+/// Body contém dados SSH para enviar ao backend
 async fn handle_xhttp_post(
-    client: &mut TcpStream,
+    stream: &mut TcpStream,
+    full_request: &str,
     path: &str,
-    body: &[u8],
-    _ssh_only: bool,
-) -> Result<(), Error> {
-    let clean_path = path.trim_start_matches('/');
-    let parts: Vec<&str> = clean_path.split('/').collect();
+    ssh_only: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Extrair session_id e sequence do path
+    // Formato: /ssh/{sessionId}/{sequence}
+    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
 
-    let session_id = if parts.len() >= 2 {
-        parts[1].to_string()
-    } else if !parts.is_empty() {
-        parts[0].to_string()
-    } else {
-        return Err(Error::new(std::io::ErrorKind::InvalidInput, "Path vazio"));
-    };
+    let session_id = if parts.len() >= 2 { parts[1].to_string() } else { String::new() };
+    let sequence = if parts.len() >= 3 { parts[2].parse::<u64>().unwrap_or(0) } else { 0 };
 
-    let seq: u64 = if parts.len() > 2 {
-        parts[2].parse().unwrap_or(0)
-    } else {
-        0
-    };
-
-    info!("xHTTP POST session={} seq={} body={}B", session_id, seq, body.len());
-
-    // Obter sessão
-    let sessions = SESSIONS.lock().await;
-    let session = sessions.get(&session_id).cloned();
-    drop(sessions);
-
-    let session = match session {
-        Some(s) => s,
-        None => {
-            // Cliente enviou POST antes do GET, retornar 404
-            let resp = format!(
-                "HTTP/1.1 404 Not Found\r\n\
-                 Content-Length: 27\r\n\
-                 Connection: close\r\n\r\nSession {} not found",
-                session_id
-            );
-            client.write_all(resp.as_bytes()).await?;
-            return Ok(());
-        }
-    };
-
-    // Encaminhar dados ao backend
-    {
-        let mut sess = session.lock().await;
-        if let Err(e) = sess.write_backend(body).await {
-            info!("xHTTP POST write_backend error: {}", e);
-        }
+    if session_id.is_empty() {
+        println!("[xHTTP] POST sem session_id válido");
+        send_404(stream, "@SDProxy").await?;
+        return Ok(());
     }
 
-    // Responder 200 OK
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\n\
-         Server: SDProxy\r\n\
-         Content-Type: application/octet-stream\r\n\
-         Content-Length: 2\r\n\
-         Connection: keep-alive\r\n\
-         X-Session: {}\r\n\
-         X-Seq: {}\r\n\r\nOK",
-        session_id, seq
-    );
-    client.write_all(resp.as_bytes()).await?;
-    client.flush().await?;
+    println!("[xHTTP] POST session={} seq={}", session_id, sequence);
 
-    Ok(())
-}
+    // Extrair Content-Length para saber quanto ler do body
+    let content_length = extract_content_length(full_request).unwrap_or(0);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Proto handler (TCP raw sem HTTP)
-// ─────────────────────────────────────────────────────────────────────────────
+    if content_length == 0 {
+        println!("[xHTTP] POST sem body");
+        send_200(stream, "@SDProxy").await?;
+        return Ok(());
+    }
 
-pub async fn handle_proto(
-    mut socket: TcpStream,
-    ssh_only: bool,
-) -> Result<(), Error> {
-    info!("Proto: conexão raw");
+    // Ler o body
+    let mut body_buf = vec![0u8; content_length as usize];
+    match timeout(Duration::from_secs(30), stream.read_exact(&mut body_buf)).await {
+        Ok(Ok(())) => {
+            println!("[xHTTP] POST body recebido: {} bytes", body_buf.len());
 
-    let addr = if ssh_only {
-        "127.0.0.1:22"
-    } else {
-        "127.0.0.1:22"
-    };
-
-    let mut backend = match TcpStream::connect(addr).await {
-        Ok(s) => s,
-        Err(e) => {
-            if !ssh_only {
-                match TcpStream::connect("127.0.0.1:1194").await {
-                    Ok(s) => s,
-                    Err(e2) => return Err(Error::new(
-                        std::io::ErrorKind::ConnectionRefused,
-                        format!("SSH: {}, VPN: {}", e, e2))),
+            // Encontrar sessão e enviar dados ao SSH backend
+            let mut sessions = SESSIONS.lock().await;
+            if let Some(session) = sessions.get_mut(&session_id) {
+                if session.active {
+                    // Enviar dados ao SSH backend
+                    match session.ssh_stream.write_all(&body_buf).await {
+                        Ok(_) => {
+                            session.uplink_sequence = sequence + 1;
+                            send_200(stream, "@SDProxy").await?;
+                        }
+                        Err(e) => {
+                            println!("[xHTTP] Erro ao enviar ao SSH: {}", e);
+                            send_500(stream, "@SDProxy").await?;
+                        }
+                    }
+                } else {
+                    println!("[xHTTP] Sessão {} inativa", session_id);
+                    send_410(stream, "@SDProxy").await?;
                 }
             } else {
-                return Err(e);
+                println!("[xHTTP] Sessão {} não encontrada", session_id);
+                send_404(stream, "@SDProxy").await?;
             }
         }
-    };
+        _ => {
+            println!("[xHTTP] Timeout ou erro ao ler POST body");
+            send_408(stream, "@SDProxy").await?;
+        }
+    }
 
-    info!("Proto: backend conectado");
-    tokio::io::copy_bidirectional(&mut socket, &mut backend).await?;
-    info!("Proto: tunnel finalizado");
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
+/// Handler Proto (fallback para outros protocolos)
+pub async fn handle_proto(
+    mut stream: TcpStream,
+    ssh_only: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("[Proto] Nova conexão proto");
+
+    let addr = if ssh_only { "127.0.0.1:22" } else { "127.0.0.1:22" };
+
+    match TcpStream::connect(addr).await {
+        Ok(mut backend) => {
+            let (cr, cw) = stream.into_split();
+            let (sr, sw) = backend.into_split();
+            let cr = Arc::new(Mutex::new(cr));
+            let cw = Arc::new(Mutex::new(cw));
+            let sr = Arc::new(Mutex::new(sr));
+            let sw = Arc::new(Mutex::new(sw));
+            tokio::try_join!(
+                transfer_bidirectional(cr, sw),
+                transfer_bidirectional(sr, cw),
+            )?;
+        }
+        Err(e) => {
+            println!("[Proto] Erro backend: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+// Helper functions
 
 fn extract_session_id(path: &str) -> String {
-    let clean = path.trim_start_matches('/');
-    let parts: Vec<&str> = clean.split('/').collect();
+    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     if parts.len() >= 2 {
         parts[1].to_string()
-    } else if !parts.is_empty() {
+    } else if parts.len() == 1 && !parts[0].is_empty() {
         parts[0].to_string()
     } else {
         String::new()
     }
 }
 
-async fn get_or_create_session(
-    id: &str,
-    ssh_only: bool,
-) -> Result<Arc<Mutex<XHttpSession>>, Error> {
-    let mut sessions = SESSIONS.lock().await;
-    let session = sessions.entry(id.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(XHttpSession::new())))
-        .clone();
-    drop(sessions);
-
-    // Conectar backend se necessário
-    {
-        let mut sess = session.lock().await;
-        sess.connect_backend(ssh_only).await?;
+fn extract_content_length(data: &str) -> Option<usize> {
+    for line in data.lines() {
+        let lower = line.to_lowercase();
+        if lower.starts_with("content-length:") {
+            return line.split(':').nth(1)?.trim().parse().ok();
+        }
     }
+    None
+}
 
-    Ok(session)
+async fn send_200(stream: &mut TcpStream, status: &str) -> Result<(), std::io::Error> {
+    stream.write_all(format!("HTTP/1.1 200 OK\r\nX-Status: {}\r\nContent-Length: 0\r\n\r\n", status).as_bytes()).await
+}
+
+async fn send_404(stream: &mut TcpStream, status: &str) -> Result<(), std::io::Error> {
+    stream.write_all(format!("HTTP/1.1 404 Not Found\r\nX-Status: {}\r\nContent-Length: 0\r\n\r\n", status).as_bytes()).await
+}
+
+async fn send_502(stream: &mut TcpStream, status: &str) -> Result<(), std::io::Error> {
+    stream.write_all(format!("HTTP/1.1 502 Bad Gateway\r\nX-Status: {}\r\nContent-Length: 0\r\n\r\n", status).as_bytes()).await
+}
+
+async fn send_500(stream: &mut TcpStream, status: &str) -> Result<(), std::io::Error> {
+    stream.write_all(format!("HTTP/1.1 500 Internal Server Error\r\nX-Status: {}\r\nContent-Length: 0\r\n\r\n", status).as_bytes()).await
+}
+
+async fn send_410(stream: &mut TcpStream, status: &str) -> Result<(), std::io::Error> {
+    stream.write_all(format!("HTTP/1.1 410 Gone\r\nX-Status: {}\r\nContent-Length: 0\r\n\r\n", status).as_bytes()).await
+}
+
+async fn send_408(stream: &mut TcpStream, status: &str) -> Result<(), std::io::Error> {
+    stream.write_all(format!("HTTP/1.1 408 Request Timeout\r\nX-Status: {}\r\nContent-Length: 0\r\n\r\n", status).as_bytes()).await
+}
+
+async fn transfer_bidirectional(
+    read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
+    write_stream: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+) -> Result<(), std::io::Error> {
+    let mut buffer = [0u8; 8192];
+    loop {
+        let bytes_read = {
+            let mut read_guard = read_stream.lock().await;
+            read_guard.read(&mut buffer).await?
+        };
+        if bytes_read == 0 {
+            break;
+        }
+        let mut write_guard = write_stream.lock().await;
+        write_guard.write_all(&buffer[..bytes_read]).await?;
+    }
+    Ok(())
 }

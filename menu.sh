@@ -1,10 +1,11 @@
 #!/bin/bash
 
 # ============================================
-# SDProxy Menu - Free v2.1
+# SDProxy Menu - Free v2.2
 # ============================================
 
 SDPROXY="/opt/sdproxy/proxy"
+SDPROXY_XHTTP="/opt/sdproxy/proxy-xhttp"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # Cores
@@ -38,7 +39,7 @@ show_menu() {
     show_banner
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║       SDProxy Menu Free v2.1     ║${NC}"
+    echo -e "${CYAN}║       SDProxy Menu Free v2.2     ║${NC}"
     echo -e "${CYAN}╠══════════════════════════════════╣${NC}"
     echo -e "${CYAN}║                                  ║${NC}"
     echo -e "${CYAN}║ ${WHITE}[01]${NC} - ABRIR PORTA               ${CYAN}║${NC}"
@@ -181,8 +182,8 @@ open_xhttp() {
 
     mkdir -p /opt/sdproxy
 
-    if [ ! -f "$SDPROXY" ]; then
-        echo -e "${RED}SDProxy não encontrado! Execute o install.sh primeiro.${NC}"
+    if [ ! -f "$SDPROXY_XHTTP" ]; then
+        echo -e "${RED}sdproxy-xhttp não encontrado! Execute o install.sh primeiro.${NC}"
         read -p "Enter pra continuar..."
         return
     fi
@@ -294,7 +295,7 @@ create_xhttp_service() {
     local STATUS=$2
     local SERVICE_FILE="${SYSTEMD_DIR}/proxy-443.service"
 
-    EXTRA_ARGS="-p 443 -s ${STATUS} -t -ssh -xhttp"
+    EXTRA_ARGS="-p 443 -s ${STATUS}"
 
     cat > "$SERVICE_FILE" << EOF
 [Unit]
@@ -303,7 +304,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${SDPROXY} ${EXTRA_ARGS}
+ExecStart=${SDPROXY_XHTTP} ${EXTRA_ARGS}
 Restart=on-failure
 RestartSec=5
 User=root

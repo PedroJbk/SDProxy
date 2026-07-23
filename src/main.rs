@@ -12,20 +12,11 @@ mod security;
 mod tcp_fallback;
 mod tls;
 mod ssh;
-mod xhttp;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    // Iniciando o proxy
     let port = get_port();
-    let status = get_status();
-    let xhttp_mode = get_xhttp_mode();
-
-    if xhttp_mode && port == 443 {
-        println!("Iniciando SDProxy xHTTP na porta: {}", port);
-        xhttp::start_xhttp_listener(port, status).await?;
-        return Ok(());
-    }
-
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
     println!("Iniciando servico na porta: {}", port);
     start_http(listener).await;
@@ -163,9 +154,4 @@ fn get_status() -> String {
     }
 
     status
-}
-
-fn get_xhttp_mode() -> bool {
-    let args: Vec<String> = env::args().collect();
-    args.contains(&"-xhttp".to_string()) || args.contains(&"--xhttp".to_string())
 }

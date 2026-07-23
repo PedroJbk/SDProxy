@@ -323,13 +323,14 @@ async fn handle_xhttp_get(
     status: &str,
     ssh_port: u16,
 ) -> Result<(), Error> {
-    let session_id = extract_session_id(path);
-    println!("[xHTTP GET] Path: {} Session: {}", path, session_id);
-
+    let mut session_id = extract_session_id(path);
+    
+    // Se path está vazio ou não tem session ID, gerar um novo
     if session_id.is_empty() {
-        let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-        stream.write_all(resp.as_bytes()).await?;
-        return Ok(());
+        session_id = generate_session_id();
+        println!("[xHTTP GET] Path: {} Session: {} (gerado)", path, session_id);
+    } else {
+        println!("[xHTTP GET] Path: {} Session: {}", path, session_id);
     }
 
     // Conectar ao SSH backend
@@ -480,10 +481,19 @@ fn extract_session_id(path: &str) -> String {
     if parts.len() >= 2 {
         parts[1].to_string()
     } else if parts.len() == 1 && !parts[0].is_empty() {
-        parts[0].to_string()
+        // Se é só o basePath (ex: /ssh), retorna vazio para gerar novo
+        String::new()
     } else {
+        // Path vazio ou /
         String::new()
     }
+}
+
+/// Gerar session ID unico
+fn generate_session_id() -> String {
+    use std::time::SystemTime;
+    let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+    format!("{:x}{:x}", t.as_secs(), t.subsec_nanos())
 }
 
 fn extract_content_length(data: &str) -> Option<usize> {

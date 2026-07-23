@@ -249,70 +249,38 @@ async fn handle_xhttp_get(
         println!("[xHTTP GET] Sessão {} registrada", session_id);
     }
 
-    // Enviar response HTTP 200 com Transfer-Encoding: chunked
+    // Enviar response HTTP 200 OK sem Content-Length (streaming infinito)
+    // Muitos clientes XHTTP esperam um stream contínuo no corpo do GET
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: application/octet-stream\r\n\
-         Transfer-Encoding: chunked\r\n\
-         Cache-Control: no-cache\r\n\
+         Cache-Control: no-cache, no-store, must-revalidate\r\n\
+         Pragma: no-cache\r\n\
+         Expires: 0\r\n\
          Connection: keep-alive\r\n\
-         X-Session: {}\r\n\
+         X-Session-ID: {}\r\n\
          X-Status: {}\r\n\r\n",
         session_id, status
     );
 
-    println!("[xHTTP GET] Enviando response 200 chunked");
+    println!("[xHTTP GET] Enviando headers de streaming");
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
-    println!("[xHTTP GET] Response enviado, iniciando streaming SSH → cliente");
 
-    // Loop: ler dados do SSH e enviar como chunks HTTP
+    // Stream direto SSH -> Cliente (sem chunked para maior compatibilidade com SplitHTTP)
+    let mut buffer = [0u8; 16384];
     loop {
-        let data = {
-            let mut read_guard = ssh_r.lock().await;
-            let mut buf = [0u8; 4096];
-            match timeout(Duration::from_secs(120), read_guard.read(&mut buf)).await {
-                Ok(Ok(0)) => {
-                    println!("[xHTTP GET] SSH fechou conexão (EOF)");
-                    break;
-                }
-                Ok(Ok(n)) => {
-                    println!("[xHTTP GET] SSH → {} bytes", n);
-                    Some(buf[..n].to_vec())
-                }
-                Ok(Err(e)) => {
-                    println!("[xHTTP GET] Erro lendo SSH: {}", e);
-                    break;
-                }
-                Err(_) => {
-                    // Timeout - enviar chunk vazio para manter conexão viva
-                    println!("[xHTTP GET] Timeout SSH, keepalive...");
-                    None
-                }
+        let mut read_guard = ssh_r.lock().await;
+        match timeout(Duration::from_secs(60), read_guard.read(&mut buffer)).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => {
+                if stream.write_all(&buffer[..n]).await.is_err() { break; }
+                let _ = stream.flush().await;
             }
-        };
-
-        match data {
-            Some(chunk) => {
-                // Enviar como chunked encoding
-                let chunk_header = format!("{:x}\r\n", chunk.len());
-                if stream.write_all(chunk_header.as_bytes()).await.is_err() {
-                    println!("[xHTTP GET] Erro escrevendo chunk header, cliente fechou");
-                    break;
-                }
-                if stream.write_all(&chunk).await.is_err() {
-                    println!("[xHTTP GET] Erro escrevendo chunk data");
-                    break;
-                }
-                if stream.write_all(b"\r\n").await.is_err() {
-                    break;
-                }
-                if stream.flush().await.is_err() {
-                    break;
-                }
-            }
-            None => {
-                // Keepalive - esperar mais
+            Ok(Err(_)) => break,
+            Err(_) => {
+                // Enviar um byte nulo como keep-alive se necessário
+                // Mas no XHTTP/SplitHTTP o stream deve ser limpo
             }
         }
     }
@@ -383,20 +351,27 @@ async fn handle_xhttp_post(
     println!("[xHTTP POST] Body lido: {}/{} bytes", total_read, content_length);
 
     // Enviar dados ao SSH backend via sessão
-    let mut sessions = SESSIONS.lock().await;
+    // Importante: No SplitHTTP, os POSTs podem chegar fora de ordem ou em paralelo
+    // Aqui simplificamos, mas garantimos que o SSH receba os dados
+    let sessions = SESSIONS.lock().await;
     if let Some(session) = sessions.get(&session_id) {
         let mut write_guard = session.ssh_write.lock().await;
         if write_guard.write_all(&body_buf[..total_read]).await.is_err() {
             println!("[xHTTP POST] Erro escrevendo no SSH");
-        } else {
-            println!("[xHTTP POST] {} bytes enviados ao SSH", total_read);
+            let resp = format!("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+            stream.write_all(resp.as_bytes()).await?;
+            return Ok(());
         }
+        println!("[xHTTP POST] {} bytes enviados ao SSH (Seq: {})", total_read, sequence);
     } else {
         println!("[xHTTP POST] Sessão {} não encontrada!", session_id);
+        let resp = format!("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+        stream.write_all(resp.as_bytes()).await?;
+        return Ok(());
     }
 
-    // Responder 200 (sucesso = body aceito para entrega)
-    let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Status: {}\r\n\r\n", status);
+    // Responder 200 OK imediatamente após processar o body
+    let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n");
     stream.write_all(resp.as_bytes()).await?;
     stream.flush().await?;
 

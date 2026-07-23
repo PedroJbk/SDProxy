@@ -43,6 +43,28 @@ async fn start_http(listener: TcpListener) {
 async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let status = get_status();
 
+    // Detectar se é TLS (0x16) antes de qualquer resposta HTTP
+    let mut first_byte = [0u8; 1];
+    let peek_res = timeout(Duration::from_millis(500), client_stream.peek(&mut first_byte)).await;
+    
+    if let Ok(Ok(1)) = peek_res {
+        if first_byte[0] == 0x16 {
+            // É TLS! Fazer passthrough direto para o SSH (porta 22)
+            // Isso corrige o erro de "Premature connection close" em conexões SSL/TLS
+            let server_connect = TcpStream::connect("127.0.0.1:22").await;
+            if let Ok(server_stream) = server_connect {
+                let (mut cr, mut cw) = client_stream.into_split();
+                let (mut sr, mut sw) = server_stream.into_split();
+                let _ = tokio::try_join!(
+                    tokio::io::copy(&mut cr, &mut sw),
+                    tokio::io::copy(&mut sr, &mut cw)
+                );
+            }
+            return Ok(());
+        }
+    }
+
+    // Se não for TLS, segue o fluxo legado (HTTP Injection)
     // SEMPRE envia 101 primeiro
     client_stream
         .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
@@ -50,7 +72,7 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
 
     // SEMPRE le do cliente
     let mut buffer = vec![0; 1024];
-    client_stream.read(&mut buffer).await?;
+    let _ = client_stream.read(&mut buffer).await?;
 
     // SEMPRE envia 200
     client_stream
@@ -58,18 +80,14 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
         .await?;
 
     // Detecta SSH vs VPN pelo peek
-    let mut addr_proxy = "0.0.0.0:22";
+    let mut addr_proxy = "127.0.0.1:22";
     let result = timeout(Duration::from_secs(1), peek_stream(&mut client_stream)).await
         .unwrap_or_else(|_| Ok(String::new()));
 
     if let Ok(data) = result {
-        if data.contains("SSH") || data.is_empty() {
-            addr_proxy = "0.0.0.0:22";
-        } else {
-            addr_proxy = "0.0.0.0:1194";
+        if !data.contains("SSH") && !data.is_empty() {
+            addr_proxy = "127.0.0.1:1194";
         }
-    } else {
-        addr_proxy = "0.0.0.0:22";
     }
 
     let server_connect = TcpStream::connect(addr_proxy).await;

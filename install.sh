@@ -82,12 +82,22 @@ show_progress "Instalando binários e configurando o sistema..."
 mkdir -p /opt/sdproxy || log_error "Falha ao criar diretório /opt/sdproxy."
 
 # Gerar certificados TLS para xHTTP
-if [ ! -f /opt/sdproxy/cert.pem ]; then
+mkdir -p /opt/sdproxy
+if [ ! -f /opt/sdproxy/cert.pem ] || [ ! -f /opt/sdproxy/key.pem ]; then
+    echo -e "${CYAN}  Gerando certificados TLS auto-assinados...${NC}"
     openssl req -x509 -newkey rsa:2048 -keyout /opt/sdproxy/key.pem \
         -out /opt/sdproxy/cert.pem -days 3650 -nodes \
         -subj "/CN=SDProxy" 2>/dev/null
-    log_info "Certificados TLS gerados em /opt/sdproxy/"
+    if [ -f /opt/sdproxy/cert.pem ] && [ -f /opt/sdproxy/key.pem ]; then
+        log_info "Certificados TLS gerados em /opt/sdproxy/"
+    else
+        log_error "Falha ao gerar certificados TLS!"
+    fi
+else
+    log_info "Certificados TLS ja existem em /opt/sdproxy/"
 fi
+chmod 644 /opt/sdproxy/cert.pem
+chmod 600 /opt/sdproxy/key.pem
 
 # Copiar binários
 cp ./target/release/sdproxy /opt/sdproxy/proxy 2>/dev/null || log_error "Falha ao copiar sdproxy."

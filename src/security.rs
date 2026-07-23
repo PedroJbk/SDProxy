@@ -5,16 +5,13 @@ use tokio::sync::Mutex;
 use anyhow::Result;
 use log::info;
 
-/// Handle SECURITY - PADRAO BSProxy SIMPLIFICADO
 pub async fn handle_security(mut socket: TcpStream, status: &str) -> Result<()> {
     info!("SECURITY handshake...");
 
-    // Ler payload do Injector
     let mut buf = [0u8; 8192];
     let n = socket.read(&mut buf).await?;
     info!("Payload recebido ({} bytes)", n);
-
-    // Detectar backend
+    
     let payload_str = String::from_utf8_lossy(&buf[..n]);
     let addr_proxy = if payload_str.contains("SSH") || payload_str.contains("ssh") {
         "127.0.0.1:22"
@@ -22,7 +19,6 @@ pub async fn handle_security(mut socket: TcpStream, status: &str) -> Result<()> 
         "127.0.0.1:1194"
     };
 
-    // Conectar ao backend PRIMEIRO
     info!("Conectando ao backend: {}", addr_proxy);
     let server_stream = match TcpStream::connect(addr_proxy).await {
         Ok(s) => s,
@@ -39,19 +35,16 @@ pub async fn handle_security(mut socket: TcpStream, status: &str) -> Result<()> 
         }
     };
 
-    // Enviar 101 ao Injector
     let response_101 = format!("HTTP/1.1 101 {}\r\n\r\n", status);
     socket.write_all(response_101.as_bytes()).await?;
     socket.flush().await?;
     info!("Enviado: 101 {}", status);
 
-    // Enviar 200 ao Injector
     let response_200 = format!("HTTP/1.1 200 {}\r\n\r\n", status);
     socket.write_all(response_200.as_bytes()).await?;
     socket.flush().await?;
     info!("Enviado: 200 {}", status);
 
-    // Tunnel bidirecional
     let (client_r, client_w) = socket.into_split();
     let (server_r, server_w) = server_stream.into_split();
 

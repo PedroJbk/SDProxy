@@ -377,17 +377,38 @@ async fn handle_xhttp_get(
     stream.flush().await?;
     println!("[xHTTP GET] Headers de streaming enviados");
 
-    // Stream direto SSH -> Cliente
+    // Loop: aguarda dados SSH e envia para cliente
+    // O SSH precisa receber dados do cliente (via POST) antes de responder
+    // Entao aqui so lemos o que o SSH enviar de volta
     let mut buffer = [0u8; 16384];
     loop {
-        let mut read_guard = ssh_r.lock().await;
-        match timeout(Duration::from_secs(60), read_guard.read(&mut buffer)).await {
-            Ok(Ok(0)) => break,
-            Ok(Ok(n)) => {
-                if stream.write_all(&buffer[..n]).await.is_err() { break; }
-                let _ = stream.flush().await;
+        // Ler dados do SSH - lock primeiro, depois read
+        {
+            let mut read_guard = ssh_r.lock().await;
+            match timeout(Duration::from_secs(30), read_guard.read(&mut buffer)).await {
+                Ok(Ok(0)) => {
+                    println!("[xHTTP GET] SSH EOF");
+                    // Sair do loop
+                    break;
+                }
+                Ok(Ok(n)) => {
+                    drop(read_guard); // liberar lock
+                    println!("[xHTTP GET] SSH -> cliente: {} bytes", n);
+                    if stream.write_all(&buffer[..n]).await.is_err() {
+                        println!("[xHTTP GET] Erro escrevendo para cliente");
+                        break;
+                    }
+                    let _ = stream.flush().await;
+                }
+                Ok(Err(e)) => {
+                    println!("[xHTTP GET] Erro lendo SSH: {}", e);
+                    break;
+                }
+                Err(_) => {
+                    println!("[xHTTP GET] Timeout SSH (30s), esperando mais POSTs...");
+                    // Nao break - continua esperando
+                }
             }
-            _ => break,
         }
     }
 

@@ -55,27 +55,23 @@ async fn handle_xhttp_client(
     status: &str,
     ssh_port: u16,
 ) -> Result<(), Error> {
-    // Ler primeiros bytes para detectar TLS
-    let mut buf = [0u8; 1];
-    let n = match timeout(Duration::from_secs(10), stream.read(&mut buf)).await {
-        Ok(Ok(n)) => n,
-        _ => return Ok(()),
+    // Usar PEEK para detectar TLS sem consumir o byte
+    let mut peek_buf = [0u8; 1];
+    let peek_result = timeout(Duration::from_secs(10), stream.peek(&mut peek_buf)).await;
+    let first_byte = match peek_result {
+        Ok(Ok(1)) => peek_buf[0],
+        _ => 0x00,
     };
 
-    if n == 0 {
-        return Ok(());
-    }
-
-    let first_byte = buf[0];
     let is_tls = first_byte == 0x16;
-
-    println!("[xHTTP] Conexão {}: TLS={}", first_byte, is_tls);
+    println!("[xHTTP] Conexão: first_byte=0x{:02x} TLS={}", first_byte, is_tls);
 
     if is_tls {
         handle_tls_xhttp(stream, status, ssh_port).await
     } else {
-        // Fallback HTTP direto
-        handle_http_xhttp(stream, &buf[..1], status, ssh_port).await
+        // Na porta 443, sempre assumimos TLS. Se não for TLS, tenta mesmo assim
+        println!("[xHTTP] Não é TLS (0x{:02x}), tentando TLS mesmo assim...", first_byte);
+        handle_tls_xhttp(stream, status, ssh_port).await
     }
 }
 

@@ -56,23 +56,31 @@ async fn handle_xhttp_client(
     ssh_port: u16,
 ) -> Result<(), Error> {
     // Usar PEEK para detectar TLS sem consumir o byte
-    let mut peek_buf = [0u8; 1];
+    let mut peek_buf = [0u8; 3];
     let peek_result = timeout(Duration::from_secs(10), stream.peek(&mut peek_buf)).await;
-    let first_byte = match peek_result {
-        Ok(Ok(1)) => peek_buf[0],
-        _ => 0x00,
+    let bytes_peeked = match peek_result {
+        Ok(Ok(n)) => n,
+        _ => return Ok(()),
     };
 
-    let is_tls = first_byte == 0x16;
-    println!("[xHTTP] Conexão: first_byte=0x{:02x} TLS={}", first_byte, is_tls);
+    let first_byte = peek_buf[0];
+    println!("[xHTTP] Conexão: first_byte=0x{:02x} bytes={}", first_byte, bytes_peeked);
 
-    if is_tls {
-        handle_tls_xhttp(stream, status, ssh_port).await
-    } else {
-        // Na porta 443, sempre assumimos TLS. Se não for TLS, tenta mesmo assim
-        println!("[xHTTP] Não é TLS (0x{:02x}), tentando TLS mesmo assim...", first_byte);
-        handle_tls_xhttp(stream, status, ssh_port).await
+    // Detecta TLS (0x16 = TLS ClientHello)
+    if first_byte == 0x16 {
+        println!("[xHTTP] TLS detectado, fazendo handshake...");
+        return handle_tls_xhttp(stream, status, ssh_port).await;
     }
+
+    // Detecta HTTP (GET, POST, HEAD)
+    if first_byte == 0x47 || first_byte == 0x50 || first_byte == 0x48 {
+        println!("[xHTTP] HTTP direto detectado");
+        return handle_http_xhttp_raw(stream, status, ssh_port).await;
+    }
+
+    // Dados raw TCP - tenta tratar como HTTP puro (sem TLS)
+    println!("[xHTTP] Dados raw TCP (0x{:02x}), tentando HTTP puro...", first_byte);
+    handle_http_xhttp_raw(stream, status, ssh_port).await
 }
 
 async fn handle_tls_xhttp(
@@ -200,6 +208,111 @@ async fn handle_http_xhttp(
         "GET" => handle_xhttp_get(stream, &path, status, ssh_port).await,
         "POST" => handle_xhttp_post(stream, &http_str, &path, status).await,
         _ => Ok(()),
+    }
+}
+
+/// Handle dados raw TCP como HTTP puro (sem TLS)
+async fn handle_http_xhttp_raw(
+    mut stream: TcpStream,
+    status: &str,
+    ssh_port: u16,
+) -> Result<(), Error> {
+    // Ler request HTTP completo
+    let mut buf = vec![0u8; 32768];
+    let n = match timeout(Duration::from_secs(10), stream.read(&mut buf)).await {
+        Ok(Ok(n)) if n > 0 => n,
+        _ => return Ok(()),
+    };
+
+    let http_str = String::from_utf8_lossy(&buf[..n]);
+    println!("[xHTTP RAW] Dados recebidos: {} bytes", n);
+    println!("[xHTTP RAW] Content: {:?}", &http_str[..http_str.len().min(300)]);
+
+    // Extrair headers até \r\n\r\n
+    let header_end = http_str.find("\r\n\r\n").unwrap_or(0);
+    let header_str = if header_end > 0 {
+        &http_str[..header_end]
+    } else {
+        &http_str
+    };
+
+    let (method, path) = match parse_http_request(header_str) {
+        Some(m) => m,
+        None => {
+            println!("[xHTTP RAW] Nao eh HTTP valido");
+            return Ok(());
+        }
+    };
+
+    println!("[xHTTP RAW] {} {}", method, path);
+
+    match method.as_str() {
+        "GET" => handle_xhttp_get(stream, &path, status, ssh_port).await,
+        "POST" => handle_xhttp_post_raw(stream, &http_str[..n], &path, status).await,
+        _ => Ok(()),
+    }
+}
+
+/// xHTTP POST raw (sem TLS) - precisa ler body completo
+async fn handle_xhttp_post_raw(
+    mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin,
+    full_request: &str,
+    path: &str,
+    status: &str,
+) -> Result<(), Error> {
+    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let session_id = if parts.len() >= 2 { parts[1].to_string() } else { String::new() };
+
+    println!("[xHTTP POST] Session: {}", session_id);
+
+    let content_length = extract_content_length(full_request).unwrap_or(0);
+
+    if content_length == 0 {
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Status: {}\r\n\r\n", status);
+        stream.write_all(resp.as_bytes()).await?;
+        return Ok(());
+    }
+
+    // Verificar se já temos o body no full_request
+    let header_end = full_request.find("\r\n\r\n").map(|p| p + 4).unwrap_or(0);
+    let body_in_request = full_request.len() - header_end;
+
+    // Se body ja veio completo
+    if body_in_request >= content_length {
+        let body = &full_request.as_bytes()[header_end..header_end + content_length];
+        send_to_ssh(session_id, body).await;
+    } else {
+        // Ler o restante do body
+        let remaining = content_length - body_in_request;
+        let mut body_buf = vec![0u8; remaining];
+        let mut body_read = 0;
+        while body_read < remaining {
+            match timeout(Duration::from_secs(30), stream.read(&mut body_buf[body_read..])).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => body_read += n,
+                _ => break,
+            }
+        }
+        let mut full_body = full_request.as_bytes()[header_end..].to_vec();
+        full_body.extend_from_slice(&body_buf[..body_read]);
+        send_to_ssh(session_id, &full_body[..content_length.min(full_body.len())]).await;
+    }
+
+    let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Status: {}\r\n\r\n", status);
+    stream.write_all(resp.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// Enviar dados para a sessão SSH
+async fn send_to_ssh(session_id: String, data: &[u8]) {
+    let mut sessions = SESSIONS.lock().await;
+    if let Some(session) = sessions.get(&session_id) {
+        let mut write_guard = session.ssh_write.lock().await;
+        let _ = write_guard.write_all(data).await;
+        println!("[xHTTP POST] {} bytes -> SSH session {}", data.len(), session_id);
+    } else {
+        println!("[xHTTP POST] Sessao {} nao encontrada!", session_id);
     }
 }
 

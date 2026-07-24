@@ -100,14 +100,22 @@ chmod 644 /opt/sdproxy/cert.pem
 chmod 600 /opt/sdproxy/key.pem
 
 # Copiar binários
-cp ./target/release/sdproxy /opt/sdproxy/proxy 2>/dev/null || log_error "Falha ao copiar sdproxy."
-chmod +x /opt/sdproxy/proxy
+if [ -f ./target/release/sdproxy ]; then
+    cp ./target/release/sdproxy /opt/sdproxy/proxy
+    chmod +x /opt/sdproxy/proxy
+    log_info "sdproxy instalado"
+else
+    log_error "Falha ao copiar sdproxy. Binário não encontrado em ./target/release/sdproxy"
+    log_error "Verifique o log: cat /tmp/sdproxy_build.log"
+fi
 
 if [ -f ./target/release/sdproxy-xhttp ]; then
     cp ./target/release/sdproxy-xhttp /opt/sdproxy/proxy-xhttp
     chmod +x /opt/sdproxy/proxy-xhttp
     ln -sf /opt/sdproxy/proxy-xhttp /usr/local/bin/sdproxy-xhttp
     log_info "sdproxy-xhttp instalado"
+else
+    log_error "Falha ao copiar sdproxy-xhttp. Binário não encontrado em ./target/release/sdproxy-xhttp"
 fi
 
 # Menu
